@@ -1,0 +1,4394 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// ENUMS
+// ============================================
+
+enum BarcodeType {
+  EAN8
+  EAN13
+  UPCA
+}
+
+// ============================================
+// BASIC MODELS
+// ============================================
+
+model User {
+  id           Int      @id @default(autoincrement())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         String   @default("CASHIER") // OWNER, PHARMACIST, CASHIER, INVENTORY_MANAGER, ACCOUNTANT, DISTRIBUTOR_USER, SUPER_ADMIN
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model Product {
+  id              Int         @id @default(autoincrement())
+  sku             String      @unique
+  name            String
+  labelName       String?     @map("label_name") // Display name for labels
+  barcode         String?     @unique // Legacy field, kept for backward compatibility
+  barcodeType     String?     @map("barcode_type") // Legacy field (ean13, upca, code128)
+  barcodeValue    String?     @map("barcode_value")
+  barcodeTypeEnum BarcodeType? @map("barcode_type_enum")
+  barcodeSource   String?     @map("barcode_source")
+  barcodeVerified Boolean     @default(false) @map("barcode_verified")
+  internalCode    String?     @unique // NMED-000001 etc. for POS
+  category        String
+  manufacturer    String?
+  composition     String?
+  saltComposition String?
+  hsnCode         String?     @map("hsn_code") // Required for GST compliance (enforced in app)
+  schedule        String?
+  description     String?
+  unitPrice       Float
+  salePrice       Float? // POS selling price (can differ from unitPrice)
+  mrp             Float?
+  gstRate         Decimal?    @db.Decimal(5, 2) // GST percentage, e.g. 5.00, 12.00 (required in app)
+  gstType         String      @default("EXCLUSIVE") @map("gst_type") // "INCLUSIVE" | "EXCLUSIVE"
+  gstOverride     Boolean     @default(false) @map("gst_override") // If false, derive from HSNMaster
+  isTaxExempt     Boolean     @default(false) @map("is_tax_exempt")
+  taxCategory     String      @default("TAXABLE") @map("tax_category") // TAXABLE, EXEMPT, ZERO_RATED
+  stockLevel      Int         @default(0)
+  minStock        Int         @default(0)
+  isRx            Boolean     @default(false)
+  isActive        Boolean     @default(true)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  batches   Batch[]
+  forecasts DemandForecast[]
+  favorites PosFavorite[]
+  aiInventoryAnalyses AIInventoryAnalysis[]
+  aiPriceOptimizations AIPriceOptimization[]
+
+  @@unique([barcodeTypeEnum, barcodeValue])
+  @@index([barcodeTypeEnum, barcodeValue])
+}
+
+model Batch {
+  id             Int      @id @default(autoincrement())
+  productId      Int?
+  drugLibraryId  Int?     @map("drug_library_id")
+  batchCode      String
+  expiryDate     DateTime
+  quantityOnHand Int      @default(0)
+  purchaseCost   Float?
+  purchasePrice  Float?   @map("purchase_price")
+  mrp            Float?
+  purchaseGstRate Decimal? @db.Decimal(5, 2) @map("purchase_gst_rate")
+  saleGstRateOverride Decimal? @db.Decimal(5, 2) @map("sale_gst_rate_override")
+  nearExpiryDiscountPct Decimal? @db.Decimal(5, 2) @map("near_expiry_discount_pct")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  product Product? @relation(fields: [productId], references: [id])
+  inventoryItems InventoryItem[]
+  lineItems InvoiceLineItem[]
+
+  @@unique([productId, batchCode])
+  @@index([expiryDate])
+  @@index([drugLibraryId])
+}
+
+// ============================================
+// DRUG LIBRARY MODELS (Branded + Generic)
+// ============================================
+
+model DrugMolecule {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  formulations  DrugFormulationMolecule[]
+  aliases       DrugAlias[]
+  tenantAliases TenantAlias[]
+}
+
+model DrugFormulation {
+  id           Int      @id @default(autoincrement())
+  displayName  String
+  dosageForm   String
+  route        String?
+  strengthText String?
+  composition  String // JSON string
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  molecules     DrugFormulationMolecule[]
+  brands        DrugBrand[]
+  aliases       DrugAlias[]
+  tenantAliases TenantAlias[]
+  tenantMaps    TenantProductMap[]
+}
+
+model DrugFormulationMolecule {
+  id            Int      @id @default(autoincrement())
+  formulationId Int
+  moleculeId    Int
+  strengthValue Float?
+  strengthUnit  String?
+  createdAt     DateTime @default(now())
+
+  formulation DrugFormulation @relation(fields: [formulationId], references: [id], onDelete: Cascade)
+  molecule    DrugMolecule    @relation(fields: [moleculeId], references: [id], onDelete: Cascade)
+
+  @@unique([formulationId, moleculeId])
+  @@index([moleculeId])
+}
+
+model Manufacturer {
+  id        Int      @id @default(autoincrement())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brands DrugBrand[]
+}
+
+model DrugBrand {
+  id             Int      @id @default(autoincrement())
+  name           String
+  formulationId  Int
+  manufacturerId Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  formulation   DrugFormulation    @relation(fields: [formulationId], references: [id])
+  manufacturer  Manufacturer?      @relation(fields: [manufacturerId], references: [id])
+  packs         DrugPack[]
+  aliases       DrugAlias[]
+  tenantAliases TenantAlias[]
+  tenantMaps    TenantProductMap[]
+
+  @@index([name])
+  @@index([formulationId])
+}
+
+model DrugPack {
+  id        Int      @id @default(autoincrement())
+  brandId   Int
+  packSize  String?
+  mrp       Float?
+  hsn       String?
+  gstRate   Float?
+  barcodes  String // JSON array string
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  brand         DrugBrand          @relation(fields: [brandId], references: [id])
+  aliases       DrugAlias[]
+  tenantAliases TenantAlias[]
+  tenantMaps    TenantProductMap[]
+
+  @@index([brandId])
+}
+
+model DrugAlias {
+  id            Int      @id @default(autoincrement())
+  alias         String
+  aliasType     String // BRAND, FORMULATION, MOLECULE, BARCODE, HINDI, COMMON
+  packId        Int?
+  brandId       Int?
+  formulationId Int?
+  moleculeId    Int?
+  createdAt     DateTime @default(now())
+
+  pack        DrugPack?        @relation(fields: [packId], references: [id])
+  brand       DrugBrand?       @relation(fields: [brandId], references: [id])
+  formulation DrugFormulation? @relation(fields: [formulationId], references: [id])
+  molecule    DrugMolecule?    @relation(fields: [moleculeId], references: [id])
+
+  @@index([alias])
+  @@index([aliasType])
+}
+
+// ============================================
+// TENANT-SCOPED MAPPINGS
+// ============================================
+
+model TenantProductMap {
+  id                  Int      @id @default(autoincrement())
+  tenantId            Int
+  branchId            Int?
+  localProductId      Int?
+  mappedPackId        Int?
+  mappedBrandId       Int?
+  mappedFormulationId Int?
+  source              String
+  confidence          Float
+  idempotencyKey      String?  @unique
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  pack        DrugPack?        @relation(fields: [mappedPackId], references: [id])
+  brand       DrugBrand?       @relation(fields: [mappedBrandId], references: [id])
+  formulation DrugFormulation? @relation(fields: [mappedFormulationId], references: [id])
+
+  @@unique([tenantId, localProductId])
+  @@index([tenantId])
+  @@index([branchId])
+}
+
+model TenantAlias {
+  id                  Int      @id @default(autoincrement())
+  tenantId            Int
+  alias               String
+  aliasType           String
+  mappedPackId        Int?
+  mappedBrandId       Int?
+  mappedFormulationId Int?
+  mappedMoleculeId    Int?
+  idempotencyKey      String?  @unique
+  createdAt           DateTime @default(now())
+
+  pack        DrugPack?        @relation(fields: [mappedPackId], references: [id])
+  brand       DrugBrand?       @relation(fields: [mappedBrandId], references: [id])
+  formulation DrugFormulation? @relation(fields: [mappedFormulationId], references: [id])
+  molecule    DrugMolecule?    @relation(fields: [mappedMoleculeId], references: [id])
+
+  @@index([tenantId, alias])
+  @@index([alias])
+  @@index([aliasType])
+}
+
+// ============================================
+// AI
+// ============================================
+
+model AiJob {
+  id             Int       @id @default(autoincrement())
+  jobType        String
+  status         String    @default("QUEUED")
+  inputJson      String
+  outputJson     String?
+  errorJson      String?
+  modelVersion   String
+  idempotencyKey String    @unique
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  startedAt      DateTime?
+  completedAt    DateTime?
+}
+
+model DemandForecast {
+  id                 Int      @id @default(autoincrement())
+  productId          Int
+  horizonDays        Int
+  forecastQty        Float
+  forecastSeriesJson String?
+  confidenceLevel    Float
+  modelVersion       String
+  inputsSummaryJson  String
+  generatedAt        DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id])
+}
+
+// ============================================
+// AI DEMAND FORECASTING (ADVANCED)
+// ============================================
+
+model AIDemandForecastAdvanced {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  productId         Int?     @map("product_id")
+  drugLibraryId    Int?     @map("drug_library_id")
+  
+  // Forecast Period
+  forecastType      String   @map("forecast_type") // DAILY, WEEKLY, MONTHLY, SEASONAL
+  horizonDays       Int      @map("horizon_days")
+  forecastDate      DateTime @default(now()) @map("forecast_date")
+  
+  // Forecast Results
+  forecastedQty     Decimal  @db.Decimal(10, 2) @map("forecasted_qty")
+  confidenceLevel   Decimal  @db.Decimal(5, 2) @map("confidence_level") // 0-100
+  forecastSeries    Json?    @map("forecast_series") // Time series data
+  
+  // Seasonal Factors
+  season            String?  // MONSOON, SUMMER, WINTER, FESTIVAL
+  seasonalityFactor Decimal? @db.Decimal(5, 2) @map("seasonality_factor") // Multiplier for season
+  festivalFactor    Decimal? @db.Decimal(5, 2) @map("festival_factor") // Multiplier for festivals
+  
+  // Event-Based Forecasting
+  eventType         String?  @map("event_type") // DISEASE_OUTBREAK, HEALTH_CAMPAIGN, WEATHER
+  eventImpact       Decimal? @db.Decimal(5, 2) @map("event_impact") // Percentage change
+  eventDescription  String?  @map("event_description")
+  
+  // Weather-Based Predictions
+  weatherFactor     Decimal? @db.Decimal(5, 2) @map("weather_factor")
+  weatherType       String?  @map("weather_type") // HOT, COLD, RAINY, HUMID
+  weatherImpact     String?  @map("weather_impact") // POSITIVE, NEGATIVE, NEUTRAL
+  
+  // Regional Patterns
+  region            String?  // State or city
+  regionalFactor    Decimal? @db.Decimal(5, 2) @map("regional_factor")
+  regionalTrend     String?  @map("regional_trend") // INCREASING, DECREASING, STABLE
+  
+  // Supplier Lead Time Optimization
+  recommendedOrderQty Decimal? @db.Decimal(10, 2) @map("recommended_order_qty")
+  recommendedOrderDate DateTime? @map("recommended_order_date")
+  supplierLeadTimeDays Int? @map("supplier_lead_time_days")
+  
+  // DPCO Price Impact
+  dpcoPriceImpact   Decimal? @db.Decimal(5, 2) @map("dpco_price_impact") // Percentage change in demand
+  priceElasticity   Decimal? @db.Decimal(5, 2) @map("price_elasticity")
+  
+  // Model Information
+  modelType         String   @map("model_type") // ARIMA, PROPHET, LSTM, ENSEMBLE
+  modelVersion      String?  @map("model_version")
+  modelAccuracy     Decimal? @db.Decimal(5, 2) @map("model_accuracy") // Historical accuracy
+  trainingDataPoints Int?   @map("training_data_points")
+  
+  // Forecast Breakdown
+  forecastBreakdown Json?    @map("forecast_breakdown") // Daily/weekly breakdown
+  upperBound        Decimal? @db.Decimal(10, 2) @map("upper_bound") // Upper confidence interval
+  lowerBound        Decimal? @db.Decimal(10, 2) @map("lower_bound") // Lower confidence interval
+  
+  // Insights
+  insights          Json?    // Array of insights and recommendations
+  riskFactors       Json?    @map("risk_factors") // Array of risk factors
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([productId])
+  @@index([drugLibraryId])
+  @@index([forecastType])
+  @@index([forecastDate])
+  @@index([season])
+  @@index([region])
+  @@map("ai_demand_forecast_advanced")
+}
+
+// ============================================
+// INDIAN DRUG LIBRARY (253,973 medicines)
+// ============================================
+
+model DrugLibrary {
+  id                  Int      @id @default(autoincrement())
+  brandName           String   @map("brand_name")
+  brandNameNorm       String?  @map("brand_name_norm")
+  manufacturer        String?  @map("manufacturer")
+  manufacturerNorm    String?  @map("manufacturer_norm")
+  priceInr            String?  @map("price_inr")
+  isDiscontinued      Boolean  @default(false) @map("is_discontinued")
+  type                String?  @map("type")
+  category            String?  @map("category")
+  packSize            String?  @map("pack_size")
+  packSizeNorm        String?  @map("pack_size_norm")
+  fullComposition     String?  @map("full_composition")
+  compositionNorm     String?  @map("composition_norm")
+  salts               String?  @map("salts")
+  saltsNorm           String?  @map("salts_norm")
+  composition1        String?  @map("composition_1")
+  composition2        String?  @map("composition_2")
+  gstPercent          Float?   @map("gst_percent")
+  // hsnCode             String?  @map("hsn_code") // Temporarily commented out - column doesn't exist in database
+  taxCategory         String?  @default("TAXABLE") @map("tax_category")
+  isScheduleDrug      Boolean  @default(false) @map("is_schedule_drug")
+  schedule            String?  @map("schedule")
+  rxOtc               String?  @map("rx_otc")
+  dpcoCeilingPriceInr Float?   @map("dpco_ceiling_price_inr")
+  qrCode              String   @unique @map("qr_code")
+  qrPayload           String   @map("qr_payload")
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  inventoryItems InventoryItem[]
+  scanEvents     DrugScanEvent[]
+  scanMemory     DrugScanMemory[]
+  favorites      PosFavorite[]
+
+  @@index([brandName])
+  @@index([brandNameNorm])
+  @@index([manufacturer])
+  @@index([manufacturerNorm])
+  @@index([category])
+  @@index([salts])
+  @@index([saltsNorm])
+  @@index([isDiscontinued])
+  @@index([fullComposition])
+  @@index([compositionNorm])
+  @@index([packSizeNorm])
+  @@index([qrCode])
+  @@map("drug_library")
+}
+
+model InventoryItem {
+  id            Int       @id @default(autoincrement())
+  tenantId      Int       @map("tenant_id")
+  branchId      Int?      @map("branch_id")
+  drugLibraryId Int       @map("drug_library_id")
+  qtyOnHand     Int       @default(0) @map("qty_on_hand")
+  reorderLevel  Int?      @default(0) @map("reorder_level")
+  expiryDate    DateTime? @map("expiry_date")
+  purchasePrice Float?    @map("purchase_price")
+  sellingPrice  Float?    @map("selling_price")
+  mrp           Decimal?  @db.Decimal(10, 2)
+  batchCode     String?   @map("batch_code")
+  batchId       Int?      @map("batch_id")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  drugLibrary DrugLibrary @relation(fields: [drugLibraryId], references: [id])
+  batch       Batch?      @relation(fields: [batchId], references: [id])
+
+  @@unique([tenantId, branchId, drugLibraryId, batchCode])
+  @@unique([batchId])
+  @@index([tenantId])
+  @@index([branchId])
+  @@index([tenantId, branchId])
+  @@index([drugLibraryId])
+  @@index([batchId])
+  @@index([expiryDate])
+  @@map("inventory_items")
+}
+
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  tenantId   Int      @map("tenant_id")
+  branchId   Int?     @map("branch_id")
+  userId     Int?     @map("user_id")
+  action     String
+  entity     String
+  entityId   Int?     @map("entity_id")
+  beforeJson String?  @map("before_json")
+  afterJson  String?  @map("after_json")
+  ipAddress  String?  @map("ip_address")
+  userAgent  String?  @map("user_agent")
+  createdAt  DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([branchId])
+  @@index([entity, entityId])
+  @@index([createdAt])
+  @@map("audit_log")
+}
+
+model DrugScanEvent {
+  id            Int      @id @default(autoincrement())
+  tenantId      Int      @map("tenant_id")
+  branchId      Int?     @map("branch_id")
+  userId        Int?     @map("user_id")
+  qrCode        String   @map("qr_code")
+  drugLibraryId Int      @map("drug_library_id")
+  scannedAt     DateTime @default(now()) @map("scanned_at")
+
+  drugLibrary DrugLibrary @relation(fields: [drugLibraryId], references: [id])
+
+  @@index([tenantId])
+  @@index([branchId])
+  @@index([qrCode])
+  @@index([drugLibraryId])
+  @@index([scannedAt])
+  @@map("drug_scan_events")
+}
+
+model DrugScanMemory {
+  id                     Int       @id @default(autoincrement())
+  tenantId               Int       @map("tenant_id")
+  branchId               Int?      @map("branch_id")
+  qrCode                 String    @map("qr_code")
+  drugLibraryId          Int       @map("drug_library_id")
+  lastScannedAt          DateTime  @default(now()) @map("last_scanned_at")
+  lastAddedToInventoryAt DateTime? @map("last_added_to_inventory_at")
+  scanCount              Int       @default(1) @map("scan_count")
+
+  drugLibrary DrugLibrary @relation(fields: [drugLibraryId], references: [id])
+
+  @@unique([tenantId, branchId, qrCode])
+  @@index([tenantId])
+  @@index([branchId])
+  @@index([tenantId, branchId])
+  @@index([qrCode])
+  @@index([drugLibraryId])
+  @@map("drug_scan_memory")
+}
+
+// ============================================
+// GST + INVOICING (India)
+// ============================================
+
+model Org {
+  id        Int      @id @default(autoincrement())
+  tenantId  Int      @unique @map("tenant_id")
+  name      String
+  role      String   @default("RETAILER") // RETAILER, DISTRIBUTOR, WHOLESALER
+  legalName String?  @map("legal_name")
+  tradeName String?  @map("trade_name")
+  addressLine1 String? @map("address_line1")
+  city        String?
+  state       String?
+  pincode     String?
+  stateCode   String? @map("state_code")
+  placeOfSupplyPolicy String? @default("CUSTOMER_STATE") @map("place_of_supply_policy") // CUSTOMER_STATE, STORE_STATE
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  gstins   OrgGstin[]
+  invoices Invoice[]
+  creditNotes CreditNote[] @relation("OrgCreditNotes")
+
+  @@map("orgs")
+}
+
+model OrgGstin {
+  id        Int     @id @default(autoincrement())
+  orgId     Int     @map("org_id")
+  gstin     String  @unique
+  stateCode String  @map("state_code")
+  legalName String? @map("legal_name")
+  isActive  Boolean @default(true) @map("is_active")
+
+  invoicePrefix String @default("INV") @map("invoice_prefix")
+  nextInvoiceNo Int    @default(1) @map("next_invoice_no")
+
+  org      Org       @relation(fields: [orgId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+  creditNotes CreditNote[] @relation("OrgGstinCreditNotes")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([orgId])
+  @@index([gstin])
+  @@map("org_gstins")
+}
+
+model Invoice {
+  id       Int  @id @default(autoincrement())
+  tenantId Int  @map("tenant_id")
+  branchId Int? @map("branch_id")
+
+  sellerOrgId   Int @map("seller_org_id")
+  sellerGstinId Int @map("seller_gstin_id")
+  customerId    Int? @map("customer_id")
+  prescriptionId Int? @map("prescription_id")
+
+  buyerName     String? @map("buyer_name")
+  buyerGstin    String? @map("buyer_gstin")
+  buyerPhone    String? @map("buyer_phone")
+  buyerEmail    String? @map("buyer_email")
+  buyerAddress  String? @map("buyer_address")
+  buyerCity     String? @map("buyer_city")
+  buyerState    String? @map("buyer_state")
+  buyerPincode  String? @map("buyer_pincode")
+  placeOfSupply String? @map("place_of_supply")
+
+  invoiceNumber   String?   @map("invoice_number") // Auto-generated: PP/24-25/0001 format
+  invoiceType     String    @map("invoice_type") // B2C, B2B, CREDIT_NOTE, DEBIT_NOTE
+  status          String    @default("DRAFT") @map("status") // DRAFT, ISSUED, CANCELLED, FILED, PARTIALLY_PAID
+  invoiceDate     DateTime  @default(now()) @map("invoice_date")
+  supplyType      String?   @map("supply_type") // INTRA_STATE, INTER_STATE
+  placeOfSupplyStateCode String? @map("place_of_supply_state_code")
+  eInvoicePayload Json?     @map("e_invoice_payload") // E-invoice JSON structure
+  
+  // E-Invoice fields (NIC integration)
+  eInvoiceIrn       String?   @unique @map("e_invoice_irn") // Invoice Registration Number (IRN)
+  eInvoiceQrCode    String?   @map("e_invoice_qr_code") // QR code from NIC
+  eInvoiceAckNo     String?   @map("e_invoice_ack_no") // Acknowledgment number
+  eInvoiceAckDate   DateTime? @map("e_invoice_ack_date") // Acknowledgment date
+  eInvoiceStatus    String?   @map("e_invoice_status") // PENDING, GENERATED, CANCELLED, FAILED
+  eInvoiceError     String?   @map("e_invoice_error") // Error message if generation failed
+  
+  // E-Way Bill fields
+  eWayBillNumber    String?   @unique @map("e_way_bill_number") // E-Way Bill number
+  eWayBillValidUpto DateTime? @map("e_way_bill_valid_upto") // E-Way Bill validity
+  transporterGstin  String?   @map("transporter_gstin") // Transporter GSTIN (if registered)
+  vehicleNumber     String?   @map("vehicle_number") // Vehicle registration number
+  distance          Int?      @map("distance") // Distance in kilometers
+  eWayBillStatus    String?   @map("e_way_bill_status") // PENDING, GENERATED, CANCELLED, FAILED
+  eWayBillError     String?   @map("e_way_bill_error") // Error message if generation failed
+  
+  // GST totals (for reporting)
+  totalCGSTPaise  Int       @default(0) @map("total_cgst_paise")
+  totalSGSTPaise  Int       @default(0) @map("total_sgst_paise")
+  totalIGSTPaise  Int       @default(0) @map("total_igst_paise")
+  dueDate         DateTime? @map("due_date")
+  paymentTerms    String?   @map("payment_terms")
+  referenceNumber String?   @map("reference_number")
+  notes           String?   @map("notes")
+  metadata        Json?     @map("metadata")
+
+  paymentStatus    String? @default("UNPAID") @map("payment_status") // UNPAID, PARTIALLY_PAID, PAID
+  paymentMethod    String? @map("payment_method") // CASH, CARD, UPI, CHEQUE, BANK_TRANSFER, WALLET, SPLIT
+  paymentReference String? @map("payment_reference")
+  paidAmountPaise  Int     @default(0) @map("paid_amount_paise")
+  
+  receiptSentViaSms Boolean @default(false) @map("receipt_sent_via_sms")
+  receiptSentViaEmail Boolean @default(false) @map("receipt_sent_via_email")
+
+  shippingChargesPaise  Int      @default(0) @map("shipping_charges_paise")
+  handlingChargesPaise  Int      @default(0) @map("handling_charges_paise")
+  globalDiscountPaise   Int      @default(0) @map("global_discount_paise")
+  globalDiscountPercent Decimal? @map("global_discount_percent")
+  couponCode            String?  @map("coupon_code")
+  couponDiscountPaise   Int      @default(0) @map("coupon_discount_paise")
+
+  parentInvoiceId Int?      @map("parent_invoice_id")
+  parentInvoice   Invoice?  @relation("InvoiceParent", fields: [parentInvoiceId], references: [id])
+  childInvoices   Invoice[] @relation("InvoiceParent")
+
+  originalInvoiceId Int?      @map("original_invoice_id")
+  originalInvoice   Invoice?  @relation("InvoiceReturn", fields: [originalInvoiceId], references: [id], onDelete: SetNull)
+  returns           Invoice[] @relation("InvoiceReturn")
+
+  totalTaxablePaise Int @default(0) @map("total_taxable_paise")
+  totalGstPaise     Int @default(0) @map("total_gst_paise")
+  roundOffPaise     Int @default(0) @map("round_off_paise")
+  totalInvoicePaise Int @default(0) @map("total_invoice_paise")
+
+  pdfUrl    String? @map("pdf_url")
+  qrPayload String? @map("qr_payload")
+
+  sellerOrg   Org               @relation(fields: [sellerOrgId], references: [id])
+  sellerGstin OrgGstin          @relation(fields: [sellerGstinId], references: [id])
+  customer    Customer?         @relation(fields: [customerId], references: [id])
+  prescription Prescription?    @relation(fields: [prescriptionId], references: [id])
+  lineItems   InvoiceLineItem[]
+  taxLines    TaxLine[]
+  payments    Payment[]
+  deliveries  Delivery[]
+  fraudDetections AIFraudDetection[]
+  creditNotes CreditNote[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([sellerGstinId])
+  @@index([customerId])
+  @@index([prescriptionId])
+  @@index([invoiceDate])
+  @@index([paymentStatus])
+  @@index([dueDate])
+  @@index([referenceNumber])
+  @@map("invoices")
+}
+
+model CreditNote {
+  id              Int      @id @default(autoincrement())
+  creditNoteNumber String  @unique @map("credit_note_number") // CN/YYYY-MM/0001
+  invoiceId       Int      @map("invoice_id")
+  tenantId        Int      @map("tenant_id")
+  
+  sellerOrgId     Int      @map("seller_org_id")
+  sellerGstinId   Int      @map("seller_gstin_id")
+  customerId      Int?     @map("customer_id")
+  
+  reason          String   // DAMAGED, EXPIRED, WRONG_ITEM, CUSTOMER_REQUEST, etc.
+  remarks         String?  // Additional notes
+  
+  creditNoteDate  DateTime @default(now()) @map("credit_note_date")
+  status          String   @default("ISSUED") @map("status") // ISSUED, CANCELLED
+  
+  supplyType      String?  @map("supply_type") // INTRA_STATE, INTER_STATE
+  placeOfSupplyStateCode String? @map("place_of_supply_state_code")
+  
+  // Amounts (GST reversed)
+  totalCreditPaise    Int  @default(0) @map("total_credit_paise")
+  totalTaxablePaise   Int  @default(0) @map("total_taxable_paise")
+  totalCGSTPaise      Int  @default(0) @map("total_cgst_paise")
+  totalSGSTPaise      Int  @default(0) @map("total_sgst_paise")
+  totalIGSTPaise      Int  @default(0) @map("total_igst_paise")
+  
+  // Relations
+  invoice        Invoice           @relation(fields: [invoiceId], references: [id])
+  sellerOrg      Org               @relation("OrgCreditNotes", fields: [sellerOrgId], references: [id])
+  sellerGstin    OrgGstin          @relation("OrgGstinCreditNotes", fields: [sellerGstinId], references: [id])
+  customer       Customer?         @relation(fields: [customerId], references: [id])
+  lineItems      CreditNoteLineItem[]
+  
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  
+  @@index([invoiceId])
+  @@index([tenantId])
+  @@index([creditNoteDate])
+  @@map("credit_notes")
+}
+
+model CreditNoteLineItem {
+  id                  Int      @id @default(autoincrement())
+  creditNoteId        Int      @map("credit_note_id")
+  originalLineItemId  Int      @map("original_line_item_id") // Reference to InvoiceLineItem
+  
+  productName         String   @map("product_name")
+  hsnCode             String?  @map("hsn_code")
+  quantity            Int      @default(1)
+  unitPricePaise      Int      @map("unit_price_paise")
+  
+  // GST reversal (negative values)
+  taxablePaise        Int      @default(0) @map("taxable_paise")
+  cgstPaise           Int      @default(0) @map("cgst_paise")
+  sgstPaise           Int      @default(0) @map("sgst_paise")
+  igstPaise           Int      @default(0) @map("igst_paise")
+  lineTotalPaise      Int      @default(0) @map("line_total_paise")
+  
+  reason              String   // Return reason for this item
+  remarks             String?  // Additional notes
+  
+  creditNote          CreditNote @relation(fields: [creditNoteId], references: [id], onDelete: Cascade)
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  
+  @@index([creditNoteId])
+  @@index([originalLineItemId])
+  @@map("credit_note_line_items")
+}
+
+model InvoiceLineItem {
+  id        Int @id @default(autoincrement())
+  invoiceId Int @map("invoice_id")
+
+  productId     Int?
+  drugLibraryId Int? @map("drug_library_id")
+  batchId       Int?  @map("batch_id") // Link to Batch for FIFO tracking
+  prescriptionLineId Int? @map("prescription_line_id") // Link to prescription line if dispensed
+
+  productName String    @map("product_name")
+  hsnCode     String?   @map("hsn_code") // Required for GST (enforced in app) - snapshot at invoice time
+  ean         String?   @map("ean") // EAN/GTIN barcode
+  batchNumber String?   @map("batch_number")
+  expiryDate  DateTime? @map("expiry_date")
+  unitType    String?   @default("PIECE") @map("unit_type") // PIECE, BOX, STRIP, BOTTLE, etc.
+
+  quantity        Int      @default(1)
+  unitPricePaise  Int      @default(0) @map("unit_price_paise")
+  mrpPaise        Int?     @map("mrp_paise")
+  salePricePaise  Int?     @map("sale_price_paise")
+  discountPaise   Int      @default(0) @map("discount_paise")
+  discountPercent Decimal? @map("discount_percent")
+  taxablePaise    Int      @default(0) @map("taxable_paise")
+
+  gstRateBps Int @default(0) @map("gst_rate_bps") // GST rate in basis points (e.g., 1200 = 12%) - snapshot
+  gstRate    Decimal? @db.Decimal(5, 2) @map("gst_rate") // GST rate as percentage - snapshot
+  gstType    String? @default("EXCLUSIVE") @map("gst_type") // INCLUSIVE or EXCLUSIVE
+  cgstPaise  Int @default(0) @map("cgst_paise")
+  sgstPaise  Int @default(0) @map("sgst_paise")
+  igstPaise  Int @default(0) @map("igst_paise")
+  lineTotalPaise Int @default(0) @map("line_total_paise")
+
+  hsnSource       String?  @default("DEFAULT") @map("hsn_source") // MANUAL, AI_SUGGESTED, DEFAULT
+  gstSource       String?  @default("DEFAULT") @map("gst_source")
+  aiHsnConfidence Decimal? @map("ai_hsn_confidence")
+  aiGstConfidence Decimal? @map("ai_gst_confidence")
+  aiRationale     Json?    @map("ai_rationale")
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  batch   Batch?  @relation(fields: [batchId], references: [id])
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([invoiceId])
+  @@index([drugLibraryId])
+  @@index([batchId])
+  @@map("invoice_line_items")
+}
+
+model TaxLine {
+  id         Int    @id @default(autoincrement())
+  invoiceId  Int    @map("invoice_id")
+  taxType    String @map("tax_type") // CGST, SGST, IGST
+  taxRateBps Int    @map("tax_rate_bps")
+  taxPaise   Int    @map("tax_paise")
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@map("tax_lines")
+}
+
+// ============================================
+// POS MODELS (India)
+// ============================================
+
+model Customer {
+  id        Int      @id @default(autoincrement())
+  tenantId  Int      @default(1) @map("tenant_id")
+  name      String
+  phone     String?  @unique // Unique when provided, null allowed
+  email     String?  @db.VarChar(255) // Optional, no unique constraint (can be null or duplicate)
+  dob       DateTime? @map("dob") // Date of birth
+  allergies String?  // JSON array of allergies
+  notes     String?  // General notes
+  gstin     String? // for B2B buyers
+  stateCode String?  @map("state_code") // GST state code (e.g., "27" Maharashtra)
+  isCreditCustomer Boolean @default(false) @map("is_credit_customer")
+  creditLimit Decimal? @db.Decimal(12, 2) @map("credit_limit")
+  currentCreditBalance Decimal @default(0) @db.Decimal(12, 2) @map("current_credit_balance")
+  billingAddress String? @map("billing_address")
+  billingStateCode String? @map("billing_state_code")
+  billingPincode String? @map("billing_pincode")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  loyaltyAccount LoyaltyAccount?
+  invoices      Invoice[]
+  prescriptions Prescription[]
+  creditLedger  CreditLedger[]
+  creditNotes   CreditNote[]
+  coupons       Coupon[]
+  consultations Consultation[]
+  subscriptions MedicineSubscription[]
+  deliveries    Delivery[]
+  deliveryAddresses DeliveryAddress[]
+  referralCodes ReferralCode[] @relation("Referrer")
+  referralsAsReferrer Referral[] @relation("ReferrerReferrals")
+  referralsAsReferred Referral[] @relation("ReferredCustomer")
+
+  @@index([phone])
+  @@index([tenantId])
+  @@map("customers")
+}
+
+model LoyaltyAccount {
+  id            Int      @id @default(autoincrement())
+  customerId    Int      @unique @map("customer_id")
+  pointsBalance Int      @default(0) @map("points_balance")
+  pointsRate    Decimal  @default(1.0) @db.Decimal(5, 2) @map("points_rate") // Points per ₹1 spent
+  minRedemption Int      @default(100) @map("min_redemption") // Minimum points to redeem
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  transactions LoyaltyTransaction[]
+
+  @@map("loyalty_accounts")
+}
+
+model LoyaltyTransaction {
+  id            Int      @id @default(autoincrement())
+  loyaltyAccountId Int   @map("loyalty_account_id")
+  invoiceId     Int?     @map("invoice_id")
+  type          String   // EARNED, REDEEMED, EXPIRED, ADJUSTED
+  points        Int      // Positive for earned, negative for redeemed
+  description   String?
+  createdAt     DateTime @default(now())
+
+  loyaltyAccount LoyaltyAccount @relation(fields: [loyaltyAccountId], references: [id], onDelete: Cascade)
+
+  @@index([loyaltyAccountId])
+  @@index([invoiceId])
+  @@map("loyalty_transactions")
+}
+
+model PrintJob {
+  id        Int      @id @default(autoincrement())
+  kind      String // "receipt" | "invoice" | "label"
+  payload   Json // structured print payload
+  status    String   @default("QUEUED") // QUEUED|PRINTED|FAILED
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("print_jobs")
+}
+
+model SaleDraft {
+  id              String          @id @default(cuid())
+  draftNo         String          @unique
+  buyerGstin      String?
+  sellerStateCode String?
+  buyerStateCode  String?
+  note            String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+  items           SaleDraftItem[]
+}
+
+model SaleDraftItem {
+  id      String    @id @default(cuid())
+  draftId String
+  draft   SaleDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+
+  productId    String?
+  name         String
+  barcode      String?
+  hsn          String?
+  gstRate      Decimal? @db.Decimal(5, 2)
+  gstType      String?  @default("EXCLUSIVE") @map("gst_type") // EXCLUSIVE or INCLUSIVE
+  qty          Int
+  unitPrice    Decimal  @db.Decimal(12, 2)
+  discount     Decimal  @default(0) @db.Decimal(12, 2)
+
+  createdAt DateTime @default(now())
+}
+
+// ============================================
+// PAYMENT MODELS (India-first: UPI, Card, Cash, Wallet)
+// ============================================
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+  WALLET
+  CHEQUE
+  BANK_TRANSFER
+  SPLIT
+}
+
+enum PaymentStatus {
+  INITIATED
+  PENDING
+  PAID
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum UpiProvider {
+  PHONEPE
+  GPAY
+  PAYTM
+  BHIM
+  OTHER
+}
+
+model Payment {
+  id              Int           @id @default(autoincrement())
+  invoiceId       Int           @map("invoice_id")
+  method          PaymentMethod
+  amountPaise     Int           @map("amount_paise")
+  status          PaymentStatus @default(INITIATED)
+  
+  // Card fields (secure - no raw data)
+  cardLast4       String?       @map("card_last4")
+  cardType        String?       @map("card_type") // VISA, MASTERCARD, RUPAY
+  cardTxnRef      String?       @map("card_txn_ref")
+  
+  // UPI fields
+  upiTxnId        String?       @unique @map("upi_txn_id")
+  upiVpa          String?       @map("upi_vpa") // Virtual Payment Address
+  upiProvider     UpiProvider?  @map("upi_provider")
+  upiQrPayload    String?       @map("upi_qr_payload") // upi://pay?...
+  upiQrGeneratedAt DateTime?    @map("upi_qr_generated_at")
+  
+  // Wallet fields
+  walletProvider  String?       @map("wallet_provider") // Paytm, PhonePe, etc.
+  walletTxnRef   String?       @map("wallet_txn_ref")
+  
+  // Credit fields
+  creditCustomerId Int?         @map("credit_customer_id")
+  
+  // Generic transaction reference
+  txnRef          String?       @unique @map("txn_ref")
+  txnDate         DateTime?     @map("txn_date")
+  
+  // Idempotency
+  idempotencyKey  String?       @unique @map("idempotency_key")
+  
+  notes           String?
+  metadata        Json?
+  
+  invoice         Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@index([invoiceId])
+  @@index([status])
+  @@index([upiTxnId])
+  @@index([txnRef])
+  @@index([idempotencyKey])
+  @@map("payments")
+}
+
+// ============================================
+// PRESCRIPTION MODELS
+// ============================================
+
+model Prescription {
+  id          Int                @id @default(autoincrement())
+  tenantId    Int                @default(1) @map("tenant_id")
+  customerId  Int                @map("customer_id")
+  doctorName  String?            @map("doctor_name")
+  doctorPhone String?            @map("doctor_phone")
+  doctorLicense String?          @map("doctor_license") // Doctor license number
+  date        DateTime           @default(now())
+  status      String             @default("PENDING") // PENDING, VERIFIED, DISPENSED, REJECTED
+  notes       String?
+  metadata    Json?
+  
+  // OCR/Digitization fields
+  imageUrl    String?            @map("image_url") // Prescription image URL
+  ocrText     String?            @map("ocr_text") // Extracted text from OCR
+  ocrProvider String?            @map("ocr_provider") // google, aws, tesseract
+  ocrConfidence Decimal?         @db.Decimal(5, 2) @map("ocr_confidence") // 0-100
+  ocrProcessedAt DateTime?       @map("ocr_processed_at")
+  isAutoCreated Boolean          @default(false) @map("is_auto_created") // Created from OCR
+  
+  customer    Customer           @relation(fields: [customerId], references: [id])
+  lines       PrescriptionLine[]
+  invoices    Invoice[]
+  consultations Consultation[]
+  subscriptions MedicineSubscription[]
+  aiValidations AIPrescriptionValidation[]
+  
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([status])
+  @@index([date])
+  @@map("prescriptions")
+}
+
+model PrescriptionLine {
+  id             Int          @id @default(autoincrement())
+  prescriptionId Int         @map("prescription_id")
+  drugLibraryId  Int?        @map("drug_library_id")
+  productId      Int?
+  
+  medicationName String
+  dosage         String?
+  frequency      String?
+  duration       String?
+  quantity       Int          @default(1)
+  
+  status         String       @default("PENDING") // PENDING, DISPENSED, NOT_AVAILABLE, SUBSTITUTED
+  dispensedAt    DateTime?    @map("dispensed_at")
+  invoiceLineItemId Int?      @map("invoice_line_item_id")
+  
+  prescription   Prescription @relation(fields: [prescriptionId], references: [id], onDelete: Cascade)
+  
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@index([prescriptionId])
+  @@index([drugLibraryId])
+  @@index([status])
+  @@map("prescription_lines")
+}
+
+// ============================================
+// HSN MASTER (India GST)
+// ============================================
+
+model HSNMaster {
+  id          String   @id @default(cuid())
+  hsnCode     String   @unique // e.g. "3004"
+  description String
+  defaultGstRate Decimal? @db.Decimal(5, 2) @default(18.00) @map("default_gst_rate") // allowed: 0,5,12,18,28
+  gstType     String   @default("EXCLUSIVE") // "EXCLUSIVE" | "INCLUSIVE"
+  category    String?
+  isActive    Boolean  @default(true) @map("is_active")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  rules HsnRule[]
+
+  @@index([hsnCode])
+  @@index([isActive])
+  @@map("hsn_master")
+}
+
+model HsnRule {
+  id        Int      @id @default(autoincrement())
+  hsnCode   String   @map("hsn_code")
+  matchType String   @map("match_type") // EXACT_NAME, CONTAINS, SALT, BRAND, CATEGORY
+  pattern   String
+  priority  Int      @default(100)
+  enabled   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  hsnMaster HSNMaster @relation(fields: [hsnCode], references: [hsnCode], onDelete: Cascade)
+
+  @@index([hsnCode])
+  @@index([matchType])
+  @@index([enabled, priority])
+  @@map("hsn_rules")
+}
+
+model CreditLedger {
+  id            Int      @id @default(autoincrement())
+  customerId    Int      @map("customer_id")
+  invoiceId     Int?     @map("invoice_id")
+  type          String   // DEBIT (invoice), CREDIT (payment)
+  amountPaise   Int      @map("amount_paise")
+  balanceAfterPaise Int  @map("balance_after_paise")
+  description   String?
+  createdAt     DateTime @default(now())
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([invoiceId])
+  @@index([createdAt])
+  @@map("credit_ledger")
+}
+
+model Coupon {
+  id                Int      @id @default(autoincrement())
+  code              String   @unique // Unique coupon code
+  tenantId          Int      @default(1) @map("tenant_id")
+  
+  discountType      String   @map("discount_type") // PERCENTAGE, FIXED
+  discountValue     Int      @map("discount_value") // Percentage (0-100) or amount in paise
+  minPurchasePaise  Int?     @map("min_purchase_paise") // Minimum purchase amount
+  maxDiscountPaise  Int?     @map("max_discount_paise") // Maximum discount for percentage coupons
+  
+  validFrom         DateTime @map("valid_from")
+  validUntil        DateTime @map("valid_until")
+  
+  maxUses           Int?     @map("max_uses") // Total usage limit
+  maxUsesPerCustomer Int?    @default(1) @map("max_uses_per_customer") // Per customer limit
+  usedCount         Int      @default(0) @map("used_count")
+  
+  isActive          Boolean  @default(true) @map("is_active")
+  description       String?  // Coupon description
+  terms             String?  // Terms and conditions
+  
+  // Customer restrictions
+  customerId        Int?     @map("customer_id") // Customer-specific coupon
+  customer          Customer? @relation(fields: [customerId], references: [id])
+  
+  // Usage tracking
+  usages            CouponUsage[]
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([code])
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([isActive])
+  @@index([validFrom, validUntil])
+  @@map("coupons")
+}
+
+model CouponUsage {
+  id            Int      @id @default(autoincrement())
+  couponId      Int      @map("coupon_id")
+  invoiceId     Int      @map("invoice_id")
+  customerId    Int?     @map("customer_id")
+  
+  discountPaise Int      @map("discount_paise") // Actual discount applied
+  usedAt        DateTime @default(now()) @map("used_at")
+  
+  coupon        Coupon   @relation(fields: [couponId], references: [id], onDelete: Cascade)
+  
+  @@index([couponId])
+  @@index([invoiceId])
+  @@index([customerId])
+  @@index([usedAt])
+  @@map("coupon_usages")
+}
+
+// ============================================
+// PURCHASE ORDER MANAGEMENT
+// ============================================
+
+model Vendor {
+  id            Int      @id @default(autoincrement())
+  tenantId      Int      @default(1) @map("tenant_id")
+  name          String
+  gstin         String?  // Vendor GSTIN
+  stateCode     String?  @map("state_code")
+  addressLine1  String?  @map("address_line1")
+  city          String?
+  state         String?
+  pincode       String?
+  phone         String?
+  email         String?
+  contactPerson String?  @map("contact_person")
+  notes         String?
+  isActive      Boolean  @default(true) @map("is_active")
+  
+  purchaseOrders PurchaseOrder[]
+  purchaseReturns PurchaseReturn[]
+  rateContracts   RateContract[]
+  grns            GRN[]
+  
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([gstin])
+  @@index([isActive])
+  @@map("vendors")
+}
+
+model PurchaseOrder {
+  id              Int      @id @default(autoincrement())
+  poNumber        String   @unique @map("po_number") // PO/YYYY-MM/0001
+  tenantId        Int      @map("tenant_id")
+  vendorId        Int      @map("vendor_id")
+  
+  poDate          DateTime @default(now()) @map("po_date")
+  expectedDate    DateTime? @map("expected_date") // Expected delivery date
+  status          String   @default("DRAFT") @map("status") // DRAFT, SENT, CONFIRMED, PARTIALLY_RECEIVED, RECEIVED, CANCELLED
+  
+  // Amounts
+  totalAmountPaise Int     @default(0) @map("total_amount_paise")
+  totalCGSTPaise   Int     @default(0) @map("total_cgst_paise")
+  totalSGSTPaise   Int     @default(0) @map("total_sgst_paise")
+  totalIGSTPaise   Int     @default(0) @map("total_igst_paise")
+  
+  // Approval workflow
+  requestedBy     Int?     @map("requested_by") // User ID
+  approvedBy      Int?     @map("approved_by") // User ID
+  approvedAt      DateTime? @map("approved_at")
+  
+  notes           String?
+  
+  vendor          Vendor   @relation(fields: [vendorId], references: [id])
+  lineItems       PurchaseOrderLineItem[]
+  grns            GRN[] // Goods Receipt Notes
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([vendorId])
+  @@index([status])
+  @@index([poDate])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderLineItem {
+  id              Int      @id @default(autoincrement())
+  purchaseOrderId Int      @map("purchase_order_id")
+  productId       Int?
+  drugLibraryId   Int?     @map("drug_library_id")
+  
+  productName     String   @map("product_name")
+  hsnCode         String?  @map("hsn_code")
+  quantity        Int      @default(1)
+  unitPricePaise  Int      @map("unit_price_paise")
+  receivedQuantity Int     @default(0) @map("received_quantity")
+  
+  gstRate         Decimal? @db.Decimal(5, 2) @map("gst_rate")
+  taxablePaise    Int      @default(0) @map("taxable_paise")
+  cgstPaise       Int      @default(0) @map("cgst_paise")
+  sgstPaise       Int      @default(0) @map("sgst_paise")
+  igstPaise       Int      @default(0) @map("igst_paise")
+  lineTotalPaise  Int      @default(0) @map("line_total_paise")
+  
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([purchaseOrderId])
+  @@index([productId])
+  @@index([drugLibraryId])
+  @@map("purchase_order_line_items")
+}
+
+model GRN {
+  id              Int      @id @default(autoincrement())
+  grnNumber       String   @unique @map("grn_number") // GRN/YYYY-MM/0001
+  purchaseOrderId Int?     @map("purchase_order_id")
+  tenantId        Int      @map("tenant_id")
+  vendorId        Int      @map("vendor_id")
+  
+  grnDate         DateTime @default(now()) @map("grn_date")
+  invoiceNumber   String?  @map("invoice_number") // Vendor invoice number
+  invoiceDate     DateTime? @map("invoice_date")
+  
+  status          String   @default("RECEIVED") @map("status") // RECEIVED, VERIFIED, REJECTED
+  
+  receivedBy      Int?     @map("received_by") // User ID
+  verifiedBy      Int?     @map("verified_by") // User ID
+  
+  notes           String?
+  
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+  vendor          Vendor   @relation(fields: [vendorId], references: [id])
+  lineItems       GRNLineItem[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([vendorId])
+  @@index([purchaseOrderId])
+  @@index([grnDate])
+  @@map("grns")
+}
+
+model GRNLineItem {
+  id                Int      @id @default(autoincrement())
+  grnId             Int      @map("grn_id")
+  purchaseOrderLineItemId Int? @map("purchase_order_line_item_id")
+  productId         Int?
+  drugLibraryId     Int?     @map("drug_library_id")
+  
+  productName       String   @map("product_name")
+  quantity          Int      @default(1)
+  batchCode         String?  @map("batch_code")
+  expiryDate        DateTime? @map("expiry_date")
+  mrpPaise          Int?     @map("mrp_paise")
+  purchasePricePaise Int     @map("purchase_price_paise")
+  
+  grn               GRN      @relation(fields: [grnId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([grnId])
+  @@index([productId])
+  @@index([drugLibraryId])
+  @@map("grn_line_items")
+}
+
+model RateContract {
+  id              Int      @id @default(autoincrement())
+  tenantId        Int      @map("tenant_id")
+  vendorId        Int      @map("vendor_id")
+  productId       Int?
+  drugLibraryId   Int?     @map("drug_library_id")
+  
+  productName     String   @map("product_name")
+  contractPricePaise Int   @map("contract_price_paise")
+  minQuantity     Int?     @default(1) @map("min_quantity") // Minimum order quantity
+  
+  validFrom       DateTime @map("valid_from")
+  validUntil      DateTime @map("valid_until")
+  
+  isActive        Boolean  @default(true) @map("is_active")
+  notes           String?
+  
+  vendor          Vendor   @relation(fields: [vendorId], references: [id])
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([vendorId])
+  @@index([productId])
+  @@index([drugLibraryId])
+  @@index([isActive])
+  @@index([validFrom, validUntil])
+  @@map("rate_contracts")
+}
+
+model PurchaseReturn {
+  id              Int      @id @default(autoincrement())
+  returnNumber    String   @unique @map("return_number") // PR/YYYY-MM/0001
+  purchaseOrderId Int?     @map("purchase_order_id")
+  grnId           Int?     @map("grn_id")
+  vendorId        Int      @map("vendor_id")
+  tenantId        Int      @map("tenant_id")
+  
+  returnDate      DateTime @default(now()) @map("return_date")
+  reason          String   // DAMAGED, EXPIRED, WRONG_ITEM, QUALITY_ISSUE, etc.
+  status          String   @default("PENDING") @map("status") // PENDING, APPROVED, RETURNED, CANCELLED
+  
+  totalAmountPaise Int     @default(0) @map("total_amount_paise")
+  cgstPaise       Int      @default(0) @map("cgst_paise")
+  sgstPaise       Int      @default(0) @map("sgst_paise")
+  igstPaise       Int      @default(0) @map("igst_paise")
+  
+  notes           String?
+  
+  vendor          Vendor   @relation(fields: [vendorId], references: [id])
+  lineItems       PurchaseReturnLineItem[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([vendorId])
+  @@index([status])
+  @@map("purchase_returns")
+}
+
+model PurchaseReturnLineItem {
+  id              Int      @id @default(autoincrement())
+  purchaseReturnId Int     @map("purchase_return_id")
+  productName     String   @map("product_name")
+  quantity        Int      @default(1)
+  batchCode       String?  @map("batch_code")
+  reason          String
+  amountPaise     Int      @map("amount_paise")
+  
+  purchaseReturn  PurchaseReturn @relation(fields: [purchaseReturnId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([purchaseReturnId])
+  @@map("purchase_return_line_items")
+}
+
+// ============================================
+// TELEMEDICINE INTEGRATION
+// ============================================
+
+model Doctor {
+  id              Int      @id @default(autoincrement())
+  tenantId        Int      @default(1) @map("tenant_id")
+  name            String
+  licenseNumber   String   @unique @map("license_number") // Medical license number
+  specialization  String?  // General, Cardiology, etc.
+  phone           String?
+  email           String?
+  qualification   String?  // MBBS, MD, etc.
+  experience      Int?     // Years of experience
+  consultationFeePaise Int  @default(0) @map("consultation_fee_paise")
+  isActive        Boolean  @default(true) @map("is_active")
+  
+  consultations   Consultation[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([licenseNumber])
+  @@index([isActive])
+  @@map("doctors")
+}
+
+model Consultation {
+  id              Int      @id @default(autoincrement())
+  tenantId        Int      @default(1) @map("tenant_id")
+  doctorId        Int      @map("doctor_id")
+  customerId      Int      @map("customer_id")
+  
+  appointmentDate DateTime @map("appointment_date")
+  appointmentTime String   @map("appointment_time") // HH:MM format
+  status          String   @default("SCHEDULED") @map("status") // SCHEDULED, IN_PROGRESS, COMPLETED, CANCELLED, NO_SHOW
+  
+  // Video call details
+  videoCallProvider String? @map("video_call_provider") // zoom, google_meet, custom
+  videoCallUrl      String? @map("video_call_url")
+  videoCallMeetingId String? @map("video_call_meeting_id")
+  
+  // Consultation details
+  chiefComplaint   String? @map("chief_complaint")
+  diagnosis        String?
+  notes            String?
+  prescriptionId   Int?    @map("prescription_id") // Link to prescription if generated
+  
+  // Payment
+  consultationFeePaise Int  @default(0) @map("consultation_fee_paise")
+  paymentStatus    String  @default("UNPAID") @map("payment_status") // UNPAID, PAID, REFUNDED
+  paymentMethod    String? @map("payment_method")
+  paidAt           DateTime? @map("paid_at")
+  
+  doctor           Doctor   @relation(fields: [doctorId], references: [id])
+  customer         Customer @relation(fields: [customerId], references: [id])
+  prescription     Prescription? @relation(fields: [prescriptionId], references: [id])
+  
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([doctorId])
+  @@index([customerId])
+  @@index([appointmentDate])
+  @@index([status])
+  @@map("consultations")
+}
+
+// ============================================
+// VIDEO CALL PHARMA ASSIST
+// ============================================
+
+model VideoCallLog {
+  id              String   @id @default(cuid())
+  callId          String   @unique @map("call_id")
+  tenantId        Int      @map("tenant_id")
+  
+  // Call context
+  context         String   // POS, INVENTORY, PRESCRIPTION, GENERAL
+  contextData     Json?    @map("context_data") // Medicine/prescription details
+  
+  // Participants
+  requestedBy     String   @map("requested_by") // User ID
+  requestedRole   String?  @map("requested_role")
+  targetRole      String?  @map("target_role")
+  participants    Json     // Array of {userId, role, status, joinedAt, leftAt}
+  
+  // Call details
+  provider        String   // WEBRTC, TWILIO, AGORA, ZOOM, GOOGLE_MEET
+  meetingUrl      String?  @map("meeting_url")
+  meetingId       String?  @map("meeting_id")
+  accessToken     String?  @map("access_token")
+  roomName        String?  @map("room_name")
+  
+  // Status tracking
+  status          String   @default("RINGING") // INITIATING, RINGING, CONNECTED, ENDED, FAILED, MISSED
+  startedAt       DateTime? @map("started_at")
+  endedAt         DateTime? @map("ended_at")
+  duration        Int?     // seconds
+  
+  // Post-call
+  reason          String?  // Reason for call
+  postCallNotes   String?  @map("post_call_notes")
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([callId])
+  @@index([requestedBy])
+  @@index([status])
+  @@index([createdAt])
+  @@map("video_call_logs")
+}
+
+// ============================================
+// SUBSCRIPTION MEDICINE SERVICE
+// ============================================
+
+model MedicineSubscription {
+  id              Int      @id @default(autoincrement())
+  tenantId        Int      @default(1) @map("tenant_id")
+  customerId      Int      @map("customer_id")
+  prescriptionId  Int?     @map("prescription_id")
+  
+  subscriptionType String  @map("subscription_type") // MONTHLY, QUARTERLY, YEARLY
+  frequency        String  @default("MONTHLY") // MONTHLY, WEEKLY, DAILY
+  startDate        DateTime @map("start_date")
+  endDate          DateTime? @map("end_date")
+  nextDeliveryDate DateTime @map("next_delivery_date")
+  
+  status          String   @default("ACTIVE") @map("status") // ACTIVE, PAUSED, CANCELLED, COMPLETED
+  
+  // Subscription items
+  items           MedicineSubscriptionItem[]
+  
+  // Auto-payment
+  autoPaymentEnabled Boolean @default(false) @map("auto_payment_enabled")
+  paymentMethod    String? @map("payment_method") // UPI_AUTO, CARD_AUTO
+  upiMandateId     String? @map("upi_mandate_id")
+  
+  // Delivery
+  deliveryAddress String?  @map("delivery_address")
+  deliveryPhone   String?  @map("delivery_phone")
+  
+  customer        Customer @relation(fields: [customerId], references: [id])
+  prescription    Prescription? @relation(fields: [prescriptionId], references: [id])
+  deliveries      SubscriptionDelivery[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([status])
+  @@index([nextDeliveryDate])
+  @@map("medicine_subscriptions")
+}
+
+model MedicineSubscriptionItem {
+  id              Int      @id @default(autoincrement())
+  subscriptionId   Int      @map("subscription_id")
+  productId       Int?
+  drugLibraryId   Int?     @map("drug_library_id")
+  
+  productName     String   @map("product_name")
+  quantity        Int      @default(1)
+  dosage          String?  // e.g., "1-0-1"
+  frequency       String?  // e.g., "Daily"
+  
+  subscription    MedicineSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([subscriptionId])
+  @@map("medicine_subscription_items")
+}
+
+model SubscriptionDelivery {
+  id              Int      @id @default(autoincrement())
+  subscriptionId   Int      @map("subscription_id")
+  invoiceId        Int?     @map("invoice_id")
+  
+  scheduledDate   DateTime @map("scheduled_date")
+  deliveredDate   DateTime? @map("delivered_date")
+  status          String   @default("SCHEDULED") @map("status") // SCHEDULED, DISPATCHED, DELIVERED, FAILED, CANCELLED
+  
+  deliveryAddress String?  @map("delivery_address")
+  trackingNumber  String?  @map("tracking_number")
+  deliveryPartner String?  @map("delivery_partner") // ShipRocket, Delhivery, etc.
+  
+  subscription    MedicineSubscription @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([subscriptionId])
+  @@index([scheduledDate])
+  @@index([status])
+  @@map("subscription_deliveries")
+}
+
+// ============================================
+// STOCK TRANSFER NOTE (STN)
+// ============================================
+
+model StockTransferNote {
+  id              Int      @id @default(autoincrement())
+  stnNumber       String   @unique @map("stn_number") // STN/YYYY-MM/0001
+  tenantId        Int      @map("tenant_id")
+  
+  fromBranchId    Int      @map("from_branch_id")
+  toBranchId      Int      @map("to_branch_id")
+  
+  transferDate    DateTime @default(now()) @map("transfer_date")
+  status          String   @default("DRAFT") @map("status") // DRAFT, PENDING_APPROVAL, APPROVED, DISPATCHED, RECEIVED, REJECTED
+  
+  // Approval workflow
+  requestedBy     Int?     @map("requested_by")
+  approvedBy      Int?     @map("approved_by")
+  approvedAt      DateTime? @map("approved_at")
+  rejectionReason String? @map("rejection_reason")
+  
+  // GST impact
+  supplyType      String?  @map("supply_type") // INTRA_STATE, INTER_STATE
+  totalAmountPaise Int     @default(0) @map("total_amount_paise")
+  totalCGSTPaise   Int     @default(0) @map("total_cgst_paise")
+  totalSGSTPaise   Int     @default(0) @map("total_sgst_paise")
+  totalIGSTPaise   Int     @default(0) @map("total_igst_paise")
+  
+  notes           String?
+  
+  lineItems       STNLineItem[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([fromBranchId])
+  @@index([toBranchId])
+  @@index([status])
+  @@index([transferDate])
+  @@map("stock_transfer_notes")
+}
+
+model STNLineItem {
+  id              Int      @id @default(autoincrement())
+  stnId            Int      @map("stn_id")
+  productId       Int?
+  drugLibraryId   Int?     @map("drug_library_id")
+  batchId         Int?     @map("batch_id")
+  
+  productName     String   @map("product_name")
+  hsnCode         String?  @map("hsn_code")
+  quantity        Int      @default(1)
+  batchCode       String?  @map("batch_code")
+  expiryDate      DateTime? @map("expiry_date")
+  
+  unitPricePaise  Int      @map("unit_price_paise")
+  taxablePaise    Int      @default(0) @map("taxable_paise")
+  cgstPaise       Int      @default(0) @map("cgst_paise")
+  sgstPaise       Int      @default(0) @map("sgst_paise")
+  igstPaise       Int      @default(0) @map("igst_paise")
+  lineTotalPaise  Int      @default(0) @map("line_total_paise")
+  
+  stn             StockTransferNote @relation(fields: [stnId], references: [id], onDelete: Cascade)
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([stnId])
+  @@index([productId])
+  @@index([drugLibraryId])
+  @@map("stn_line_items")
+}
+
+// ============================================
+// HOME DELIVERY & TRACKING
+// ============================================
+
+model DeliveryAddress {
+  id              Int      @id @default(autoincrement())
+  customerId      Int      @map("customer_id")
+  tenantId        Int      @default(1) @map("tenant_id")
+  
+  label           String   @default("Home") // Home, Work, Other
+  name            String   // Recipient name
+  phone           String
+  addressLine1    String   @map("address_line1")
+  addressLine2    String?  @map("address_line2")
+  city            String
+  state           String
+  pincode         String
+  landmark        String?  // Nearby landmark
+  
+  isDefault       Boolean  @default(false) @map("is_default")
+  
+  customer        Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  deliveries      Delivery[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([customerId])
+  @@index([tenantId])
+  @@map("delivery_addresses")
+}
+
+model Delivery {
+  id              Int      @id @default(autoincrement())
+  tenantId        Int      @default(1) @map("tenant_id")
+  invoiceId       Int      @map("invoice_id")
+  customerId      Int      @map("customer_id")
+  deliveryAddressId Int    @map("delivery_address_id")
+  
+  deliveryNumber  String   @unique @map("delivery_number") // DEL/YYYY-MM/0001
+  status          String   @default("PENDING") @map("status") // PENDING, CONFIRMED, DISPATCHED, IN_TRANSIT, DELIVERED, FAILED, CANCELLED
+  
+  // Delivery details
+  scheduledDate   DateTime? @map("scheduled_date")
+  dispatchedDate  DateTime? @map("dispatched_date")
+  deliveredDate   DateTime? @map("delivered_date")
+  
+  // Delivery partner
+  deliveryPartner String?  @map("delivery_partner") // ShipRocket, Delhivery, etc.
+  trackingNumber  String?  @map("tracking_number")
+  trackingUrl     String?  @map("tracking_url")
+  
+  // Delivery fee
+  deliveryFeePaise Int     @default(0) @map("delivery_fee_paise")
+  distance        Int?     // Distance in km
+  
+  // OTP verification
+  otp             String?  // 6-digit OTP
+  otpExpiresAt    DateTime? @map("otp_expires_at")
+  otpVerified     Boolean  @default(false) @map("otp_verified")
+  otpVerifiedAt   DateTime? @map("otp_verified_at")
+  
+  // Delivery proof
+  deliveryProofUrl String? @map("delivery_proof_url") // Photo/signature
+  
+  notes           String?
+  
+  invoice         Invoice  @relation(fields: [invoiceId], references: [id])
+  customer        Customer @relation(fields: [customerId], references: [id])
+  deliveryAddress DeliveryAddress @relation(fields: [deliveryAddressId], references: [id])
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([invoiceId])
+  @@index([customerId])
+  @@index([status])
+  @@index([trackingNumber])
+  @@map("deliveries")
+}
+
+// ============================================
+// REFERRAL PROGRAM
+// ============================================
+
+model ReferralCode {
+  id              Int      @id @default(autoincrement())
+  tenantId        Int      @default(1) @map("tenant_id")
+  referrerId      Int      @map("referrer_id") // Customer who refers
+  code            String   @unique // Unique referral code
+  
+  // Rewards
+  referrerRewardType String @map("referrer_reward_type") // POINTS, CASH, DISCOUNT
+  referrerRewardValue Int  @map("referrer_reward_value") // Points or paise
+  referredRewardType String @map("referred_reard_type") // POINTS, CASH, DISCOUNT
+  referredRewardValue Int  @map("referred_reward_value")
+  
+  // Limits
+  maxUses         Int?     @map("max_uses") // Total usage limit
+  usedCount        Int      @default(0) @map("used_count")
+  
+  validFrom        DateTime @map("valid_from")
+  validUntil       DateTime? @map("valid_until")
+  isActive         Boolean  @default(true) @map("is_active")
+  
+  referrer         Customer @relation("Referrer", fields: [referrerId], references: [id])
+  referrals        Referral[]
+  
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([referrerId])
+  @@index([code])
+  @@index([isActive])
+  @@map("referral_codes")
+}
+
+model Referral {
+  id              Int      @id @default(autoincrement())
+  referralCodeId  Int      @map("referral_code_id")
+  referrerId      Int      @map("referrer_id")
+  referredCustomerId Int   @map("referred_customer_id")
+  
+  // First purchase by referred customer
+  firstInvoiceId  Int?     @map("first_invoice_id")
+  firstPurchaseDate DateTime? @map("first_purchase_date")
+  
+  // Rewards
+  referrerRewardPaise Int  @default(0) @map("referrer_reward_paise")
+  referredRewardPaise Int  @default(0) @map("referred_reward_paise")
+  referrerRewardPoints Int @default(0) @map("referrer_reward_points")
+  referredRewardPoints Int @default(0) @map("referred_reward_points")
+  
+  status          String   @default("PENDING") @map("status") // PENDING, REWARDED, EXPIRED
+  
+  referralCode    ReferralCode @relation(fields: [referralCodeId], references: [id], onDelete: Cascade)
+  referrer        Customer @relation("ReferrerReferrals", fields: [referrerId], references: [id])
+  referredCustomer Customer @relation("ReferredCustomer", fields: [referredCustomerId], references: [id])
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([referralCodeId])
+  @@index([referrerId])
+  @@index([referredCustomerId])
+  @@index([status])
+  @@map("referrals")
+}
+
+// ============================================
+// AI-DRIVEN FEATURES - INVENTORY OPTIMIZATION
+// ============================================
+
+model AIInventoryAnalysis {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  productId         Int?     @map("product_id")
+  drugLibraryId     Int?     @map("drug_library_id")
+  
+  analysisDate      DateTime @default(now()) @map("analysis_date")
+  analysisType      String   @map("analysis_type") // REORDER, DEADSTOCK, EXPIRY, BUNDLE, PRICING
+  
+  // Reorder Analysis
+  suggestedReorderQty Int?   @map("suggested_reorder_qty")
+  reorderPoint       Int?    @map("reorder_point")
+  safetyStock        Int?    @map("safety_stock")
+  leadTimeDays       Int?    @map("lead_time_days")
+  
+  // Deadstock Prediction
+  deadstockRiskScore Decimal? @db.Decimal(5, 2) @map("deadstock_risk_score") // 0-100
+  daysToDeadstock    Int?     @map("days_to_deadstock")
+  predictedSaleDate  DateTime? @map("predicted_sale_date")
+  
+  // Expiry Risk
+  expiryRiskScore    Decimal? @db.Decimal(5, 2) @map("expiry_risk_score") // 0-100
+  daysToExpiry       Int?     @map("days_to_expiry")
+  recommendedDiscount Decimal? @db.Decimal(5, 2) @map("recommended_discount") // Percentage
+  
+  // Bundle Recommendations
+  suggestedBundleIds Json?    @map("suggested_bundle_ids") // Array of product IDs
+  bundleScore        Decimal? @db.Decimal(5, 2) @map("bundle_score")
+  
+  // Pricing Suggestions
+  recommendedPricePaise Int?  @map("recommended_price_paise")
+  priceChangePercent    Decimal? @db.Decimal(5, 2) @map("price_change_percent")
+  pricingReason         String?  @map("pricing_reason")
+  
+  // ML Model Metadata
+  modelVersion       String?  @map("model_version")
+  confidenceScore    Decimal? @db.Decimal(5, 2) @map("confidence_score") // 0-100
+  reasoning          String?  // Explainable AI reasoning
+  
+  product            Product? @relation(fields: [productId], references: [id])
+  
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([productId])
+  @@index([analysisDate])
+  @@index([analysisType])
+  @@map("ai_inventory_analyses")
+}
+
+model AIProductRecommendation {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  sourceProductId   Int?     @map("source_product_id") // Product being viewed/purchased
+  recommendedProductId Int?  @map("recommended_product_id")
+  customerId        Int?     @map("customer_id")
+  
+  recommendationType String  @map("recommendation_type") // CROSS_SELL, UPSELL, SEASONAL, GENERIC, ALTERNATIVE
+  score             Decimal  @db.Decimal(5, 2) // 0-100 recommendation score
+  reason            String?  // Why this recommendation
+  
+  // Seasonal/Contextual
+  season            String?  // MONSOON, SUMMER, WINTER, FESTIVAL
+  festival          String?  // DIWALI, HOLI, EID, etc.
+  weather           String?  // HOT, COLD, RAINY
+  
+  // Bundle
+  bundleDiscountPercent Decimal? @db.Decimal(5, 2) @map("bundle_discount_percent")
+  
+  clicked           Boolean  @default(false)
+  purchased         Boolean  @default(false)
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([sourceProductId])
+  @@index([customerId])
+  @@index([recommendationType])
+  @@map("ai_product_recommendations")
+}
+
+model AIPriceOptimization {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  productId         Int?     @map("product_id")
+  
+  analysisDate      DateTime @default(now()) @map("analysis_date")
+  currentPricePaise Int      @map("current_price_paise")
+  recommendedPricePaise Int  @map("recommended_price_paise")
+  minPricePaise     Int?     @map("min_price_paise") // Price floor
+  maxPricePaise     Int?     @map("max_price_paise") // Price ceiling
+  
+  priceChangePercent Decimal @db.Decimal(5, 2) @map("price_change_percent")
+  
+  // Competitive Analysis
+  competitorPrices  Json?    @map("competitor_prices") // {competitor: price}
+  avgCompetitorPricePaise Int? @map("avg_competitor_price_paise")
+  
+  // Demand Elasticity
+  demandElasticity  Decimal? @db.Decimal(5, 2) @map("demand_elasticity")
+  expectedSalesChange Decimal? @db.Decimal(5, 2) @map("expected_sales_change") // Percentage
+  
+  // Margin Analysis
+  currentMarginPercent Decimal? @db.Decimal(5, 2) @map("current_margin_percent")
+  recommendedMarginPercent Decimal? @db.Decimal(5, 2) @map("recommended_margin_percent")
+  expectedRevenueChange Decimal? @db.Decimal(5, 2) @map("expected_revenue_change")
+  
+  reasoning         String?  // AI reasoning for price change
+  confidenceScore   Decimal? @db.Decimal(5, 2) @map("confidence_score")
+  
+  applied           Boolean  @default(false)
+  appliedAt         DateTime? @map("applied_at")
+  
+  product           Product? @relation(fields: [productId], references: [id])
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([productId])
+  @@index([analysisDate])
+  @@index([applied])
+  @@map("ai_price_optimizations")
+}
+
+// ============================================
+// AI PRICE INTELLIGENCE & COMPETITOR ANALYSIS
+// ============================================
+
+model AIPriceIntelligence {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  productId         Int?     @map("product_id")
+  drugLibraryId     Int?     @map("drug_library_id")
+  
+  // Current Pricing
+  currentPricePaise Int      @map("current_price_paise")
+  mrpPaise          Int?     @map("mrp_paise")
+  dpcoCeilingPricePaise Int? @map("dpco_ceiling_price_paise")
+  
+  // Competitor Analysis
+  competitorPrices  Json     @map("competitor_prices") // {competitor: price, source, date}
+  avgCompetitorPricePaise Int @map("avg_competitor_price_paise")
+  minCompetitorPricePaise Int @map("min_competitor_price_paise")
+  maxCompetitorPricePaise Int @map("max_competitor_price_paise")
+  priceRank          Int?     @map("price_rank") // 1 = cheapest, higher = more expensive
+  
+  // Price Recommendations
+  recommendedPricePaise Int  @map("recommended_price_paise")
+  priceChangePercent    Decimal @db.Decimal(5, 2) @map("price_change_percent")
+  recommendationReason  String  @map("recommendation_reason")
+  
+  // Price Elasticity
+  priceElasticity    Decimal? @db.Decimal(5, 2) @map("price_elasticity")
+  expectedSalesChange Decimal? @db.Decimal(5, 2) @map("expected_sales_change") // Percentage
+  
+  // Margin Analysis
+  currentMarginPercent Decimal? @db.Decimal(5, 2) @map("current_margin_percent")
+  recommendedMarginPercent Decimal? @db.Decimal(5, 2) @map("recommended_margin_percent")
+  expectedRevenueChange Decimal? @db.Decimal(5, 2) @map("expected_revenue_change")
+  
+  // Market Trends
+  priceTrend         String?  @map("price_trend") // INCREASING, DECREASING, STABLE
+  marketTrend        String?  @map("market_trend")
+  trendConfidence    Decimal? @db.Decimal(5, 2) @map("trend_confidence")
+  
+  // DPCO Compliance
+  isDpcoCompliant    Boolean  @default(true) @map("is_dpco_compliant")
+  dpcoComplianceNote String?  @map("dpco_compliance_note")
+  
+  // Analysis Metadata
+  analysisDate       DateTime @default(now()) @map("analysis_date")
+  dataSource         String?  @map("data_source") // MANUAL, SCRAPING, API
+  confidenceScore    Decimal  @db.Decimal(5, 2) @map("confidence_score") // 0-100
+  
+  applied            Boolean  @default(false)
+  appliedAt          DateTime? @map("applied_at")
+  
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([productId])
+  @@index([drugLibraryId])
+  @@index([analysisDate])
+  @@index([priceRank])
+  @@map("ai_price_intelligence")
+}
+
+model AICompetitorAnalysis {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  productId         Int?     @map("product_id")
+  drugLibraryId     Int?     @map("drug_library_id")
+  
+  // Competitor Information
+  competitorName    String   @map("competitor_name")
+  competitorType    String   @map("competitor_type") // ONLINE_PHARMACY, LOCAL_PHARMACY, CHAIN
+  competitorPricePaise Int   @map("competitor_price_paise")
+  competitorAvailability Boolean @default(true) @map("competitor_availability")
+  
+  // Market Position
+  priceDifference   Decimal  @db.Decimal(5, 2) @map("price_difference") // Percentage
+  priceGap          Int      @map("price_gap") // Absolute difference in paise
+  isCheaper         Boolean  @map("is_cheaper")
+  
+  // Data Source
+  source            String   // SCRAPING, API, MANUAL
+  sourceUrl         String?  @map("source_url")
+  lastUpdated       DateTime @default(now()) @map("last_updated")
+  
+  // Analysis
+  analysisDate      DateTime @default(now()) @map("analysis_date")
+  confidenceScore   Decimal  @db.Decimal(5, 2) @map("confidence_score") // 0-100
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([productId])
+  @@index([drugLibraryId])
+  @@index([competitorName])
+  @@index([analysisDate])
+  @@map("ai_competitor_analysis")
+}
+
+// ============================================
+// AI CUSTOMER LIFETIME VALUE PREDICTION
+// ============================================
+
+model AICustomerLifetimeValue {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  customerId        Int      @map("customer_id")
+  
+  // Lifetime Value Metrics
+  predictedLtv      Decimal  @db.Decimal(12, 2) @map("predicted_ltv") // Predicted lifetime value in INR
+  currentLtv       Decimal  @db.Decimal(12, 2) @map("current_ltv") // Current lifetime value
+  ltvConfidence    Decimal  @db.Decimal(5, 2) @map("ltv_confidence") // 0-100
+  
+  // Churn Prediction
+  churnRiskScore   Decimal  @db.Decimal(5, 2) @map("churn_risk_score") // 0-100 (higher = more likely to churn)
+  churnProbability Decimal  @db.Decimal(5, 2) @map("churn_probability") // 0-100
+  predictedChurnDate DateTime? @map("predicted_churn_date")
+  churnReason      String?  @map("churn_reason")
+  
+  // Customer Segmentation
+  segment          String   // HIGH_VALUE, MEDIUM_VALUE, LOW_VALUE, AT_RISK, CHURNED
+  segmentReason    String?  @map("segment_reason")
+  
+  // Purchase Behavior
+  avgOrderValue     Decimal? @db.Decimal(10, 2) @map("avg_order_value")
+  purchaseFrequency Decimal? @db.Decimal(5, 2) @map("purchase_frequency") // Orders per month
+  lastPurchaseDate  DateTime? @map("last_purchase_date")
+  daysSinceLastPurchase Int? @map("days_since_last_purchase")
+  
+  // Retention Strategy
+  retentionStrategy String?  @map("retention_strategy") // DISCOUNT, LOYALTY, PERSONALIZED, OUTREACH
+  recommendedAction String? @map("recommended_action")
+  retentionScore    Decimal? @db.Decimal(5, 2) @map("retention_score") // 0-100
+  
+  // Cross-sell/Upsell Opportunities
+  crossSellOpportunities Json? @map("cross_sell_opportunities") // Array of product recommendations
+  upsellOpportunities Json? @map("upsell_opportunities")
+  
+  // Next Purchase Prediction
+  nextPurchaseDate  DateTime? @map("next_purchase_date")
+  nextPurchaseValue Decimal? @db.Decimal(10, 2) @map("next_purchase_value")
+  nextPurchaseConfidence Decimal? @db.Decimal(5, 2) @map("next_purchase_confidence")
+  
+  // Customer Health Score
+  healthScore       Decimal  @db.Decimal(5, 2) @map("health_score") // 0-100 (overall customer health)
+  healthFactors     Json?    @map("health_factors") // Array of factors affecting health
+  
+  // Analysis Metadata
+  analysisDate      DateTime @default(now()) @map("analysis_date")
+  modelVersion      String?  @map("model_version")
+  dataPoints        Int?     @map("data_points") // Number of historical transactions used
+  confidenceScore   Decimal  @db.Decimal(5, 2) @map("confidence_score") // 0-100
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([customerId])
+  @@index([segment])
+  @@index([churnRiskScore])
+  @@index([healthScore])
+  @@index([analysisDate])
+  @@map("ai_customer_lifetime_value")
+}
+
+// ============================================
+// AI PRESCRIPTION VALIDITY CHECKER
+// ============================================
+
+model AIPrescriptionValidation {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  prescriptionId    Int?     @map("prescription_id")
+  
+  validationDate    DateTime @default(now()) @map("validation_date")
+  
+  // Authenticity Scoring
+  authenticityScore Decimal  @db.Decimal(5, 2) @map("authenticity_score") // 0-100
+  authenticityReasons Json?  @map("authenticity_reasons") // Array of reasons
+  
+  // Doctor Verification
+  doctorName        String?  @map("doctor_name")
+  doctorLicenseNumber String? @map("doctor_license_number")
+  doctorVerified    Boolean  @default(false) @map("doctor_verified")
+  doctorVerificationSource String? @map("doctor_verification_source") // MCI, State Medical Council
+  
+  // Prescription Age Analysis
+  prescriptionAge   Int?     @map("prescription_age") // Days since prescription date
+  isExpired         Boolean  @default(false) @map("is_expired")
+  expiryReason      String?  @map("expiry_reason")
+  
+  // Handwriting Analysis
+  handwritingConsistency Decimal? @db.Decimal(5, 2) @map("handwriting_consistency") // 0-100
+  signatureMatch    Decimal? @db.Decimal(5, 2) @map("signature_match")
+  
+  // Duplicate Detection
+  duplicatePrescriptionIds Json? @map("duplicate_prescription_ids") // Array of similar prescription IDs
+  duplicateScore    Decimal? @db.Decimal(5, 2) @map("duplicate_score")
+  
+  // Stamp/Seal Analysis
+  hasStamp          Boolean? @map("has_stamp")
+  hasSeal           Boolean? @map("has_seal")
+  stampQuality      Decimal? @db.Decimal(5, 2) @map("stamp_quality")
+  
+  // Overall Validation
+  isValid           Boolean  @default(false) @map("is_valid")
+  riskLevel         String?  @map("risk_level") // LOW, MEDIUM, HIGH, CRITICAL
+  validationReason  String?  @map("validation_reason")
+  requiresReview    Boolean  @default(false) @map("requires_review")
+  
+  prescription      Prescription? @relation(fields: [prescriptionId], references: [id])
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([prescriptionId])
+  @@index([isValid])
+  @@index([riskLevel])
+  @@map("ai_prescription_validations")
+}
+
+// ============================================
+// AI FRAUD DETECTION
+// ============================================
+
+model AIFraudDetection {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  invoiceId         Int?     @map("invoice_id")
+  transactionId     String?  @unique @map("transaction_id")
+  
+  detectionDate     DateTime @default(now()) @map("detection_date")
+  
+  // Fraud Risk Scoring
+  fraudRiskScore    Decimal  @db.Decimal(5, 2) @map("fraud_risk_score") // 0-100
+  riskLevel         String   @map("risk_level") // LOW, MEDIUM, HIGH, CRITICAL
+  
+  // Anomaly Detection
+  amountAnomaly     Boolean  @default(false) @map("amount_anomaly")
+  timeAnomaly       Boolean  @default(false) @map("time_anomaly")
+  patternAnomaly    Boolean  @default(false) @map("pattern_anomaly")
+  
+  // Specific Fraud Types
+  isDuplicate       Boolean  @default(false) @map("is_duplicate")
+  isInflated        Boolean  @default(false) @map("is_inflated")
+  isInsuranceFraud  Boolean  @default(false) @map("is_insurance_fraud")
+  isPaymentFraud    Boolean  @default(false) @map("is_payment_fraud")
+  
+  // Customer Risk
+  customerRiskScore Decimal? @db.Decimal(5, 2) @map("customer_risk_score")
+  customerRiskLevel String?  @map("customer_risk_level")
+  
+  // Fraud Indicators
+  fraudIndicators   Json?    @map("fraud_indicators") // Array of indicators
+  fraudReason       String?  @map("fraud_reason")
+  
+  invoice Invoice? @relation(fields: [invoiceId], references: [id])
+  
+  // Action Taken
+  status            String   @default("DETECTED") @map("status") // DETECTED, REVIEWED, APPROVED, BLOCKED
+  reviewedBy        Int?     @map("reviewed_by") // User ID
+  reviewedAt        DateTime? @map("reviewed_at")
+  actionTaken       String?  @map("action_taken")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([invoiceId])
+  @@index([riskLevel])
+  @@index([status])
+  @@map("ai_fraud_detections")
+}
+
+// ============================
+// Subscription / Billing Models
+// ============================
+
+enum SubscriptionStatus {
+  active
+  past_due
+  canceled
+  expired
+  suspended
+}
+
+model Tenant {
+  id        String   @id @default(cuid())
+  name      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  subscription        Subscription?
+  events              SubscriptionEvent[]
+  refreshTokens       RefreshToken[]
+  activeSessions       ActiveSession[]
+  mfaSecrets          MfaSecret[]
+  accountLockouts     AccountLockout[]
+  passwordResetTokens PasswordResetToken[]
+  licenseEntitlements LicenseEntitlement[]
+  licenseDevices      LicenseDevice[]
+  deviceResetCooldowns DeviceResetCooldown[]
+  licenseEvents       LicenseEvent[]
+  securityEvents      SecurityEvent[]
+}
+
+model Subscription {
+  id                  String             @id @default(cuid())
+  tenantId            String             @unique
+  tenant              Tenant             @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  plan                String             @default("annual")
+  status              SubscriptionStatus @default(expired)
+
+  currentPeriodStart  DateTime?
+  currentPeriodEnd    DateTime?
+  graceUntil          DateTime?
+
+  autoRenew           Boolean            @default(true)
+  lastPaymentAt       DateTime?
+  lockReason          String?
+
+  stripeCustomerId    String?
+  stripeSubscriptionId String?
+  
+  // Razorpay fields
+  razorpayOrderId     String?  @map("razorpay_order_id")
+  razorpayPaymentId   String?  @map("razorpay_payment_id")
+  razorpaySignature   String?  @map("razorpay_signature")
+
+  // feature flags / limits
+  featuresJson        Json?              // { aiCopilot: boolean, rxOcr: boolean, offlinePos: boolean, etc. }
+  aiCredits           Int                @default(0) @map("ai_credits")
+  aiCreditsUsed       Int                @default(0) @map("ai_credits_used")
+
+  // PharmaPulse One fields
+  planType            String?            @default("subscription") @map("plan_type") // 'one_time' or 'subscription'
+  oneTimePurchasedAt  DateTime?          @map("one_time_purchased_at")
+  oneTimeAmountPaise  Int?               @map("one_time_amount_paise")
+  serviceRenewalStatus String?          @default("INACTIVE") @map("service_renewal_status") // ACTIVE, PAST_DUE, INACTIVE
+  serviceRenewalNextDue DateTime?        @map("service_renewal_next_due")
+  branchesIncluded    Int                @default(1) @map("branches_included")
+  prioritySupport     Boolean            @default(false) @map("priority_support")
+  monthlyCreditGrant  Int                @default(0) @map("monthly_credit_grant") // Credits granted per month
+
+  createdAt           DateTime           @default(now())
+  updatedAt           DateTime           @updatedAt
+
+  billingPayments     BillingPayment[]
+  creditsLedger       CreditsLedger[]
+
+  @@index([stripeCustomerId])
+  @@index([stripeSubscriptionId])
+  @@index([status])
+  @@index([currentPeriodEnd])
+  @@index([serviceRenewalStatus])
+}
+
+model SubscriptionEvent {
+  id        String   @id @default(cuid())
+  tenantId  String
+  tenant    Tenant   @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  actor     String   // "stripe_webhook" | "super_admin" | "system"
+  type      String   // e.g. "invoice.paid", "admin.suspend", etc.
+  payload   Json?
+  createdAt DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+}
+
+// ============================================
+// PHARMAPULSE ONE BILLING
+// ============================================
+
+model CreditsLedger {
+  id           String    @id @default(cuid())
+  orgId        String    @map("org_id")
+  tenantId     String    @map("tenant_id")
+  type         String    // GRANT_MONTHLY, TOPUP, SPEND, REFUND, EXPIRED, ADJUSTMENT
+  amount       Int       // Positive for grants/topups, negative for spends/expired
+  referenceId  String?   @map("reference_id")
+  referenceType String?  @map("reference_type")
+  meta         Json?
+  expiresAt    DateTime? @map("expires_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+
+  subscription Subscription? @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([tenantId])
+  @@index([type])
+  @@index([createdAt(sort: Desc)])
+  @@index([expiresAt])
+  @@map("credits_ledger")
+}
+
+model CreditBalanceCache {
+  orgId            String    @id @map("org_id")
+  tenantId         String    @map("tenant_id")
+  balance          Int       @default(0)
+  lastCalculatedAt DateTime  @default(now()) @map("last_calculated_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  @@index([tenantId])
+  @@map("credit_balance_cache")
+}
+
+model BillingPayment {
+  id                String    @id @default(cuid())
+  orgId             String    @map("org_id")
+  tenantId          String    @map("tenant_id")
+  paymentType       String    @map("payment_type") // PLAN_PURCHASE, RENEWAL, CREDIT_TOPUP
+  amountPaise       Int       @map("amount_paise")
+  currency          String    @default("INR")
+  paymentProvider   String    @map("payment_provider") // stripe, razorpay, etc.
+  providerPaymentId String?   @map("provider_payment_id")
+  providerCustomerId String?  @map("provider_customer_id")
+  status            String    @default("pending") // pending, succeeded, failed, refunded
+  idempotencyKey    String?   @unique @map("idempotency_key")
+  invoiceNumber     String?  @map("invoice_number")
+  invoicePdfPath    String?  @map("invoice_pdf_path")
+  gstAmountPaise    Int      @default(0) @map("gst_amount_paise")
+  metadata          Json?
+  createdAt         DateTime @default(now()) @map("created_at")
+  paidAt            DateTime? @map("paid_at")
+  refundedAt        DateTime? @map("refunded_at")
+
+  subscription Subscription @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+  invoices     BillingInvoice[]
+
+  @@index([orgId])
+  @@index([tenantId])
+  @@index([paymentType])
+  @@index([status])
+  @@index([idempotencyKey])
+  @@index([providerPaymentId])
+  @@map("billing_payments")
+}
+
+model BillingInvoice {
+  id              String    @id @default(cuid())
+  orgId            String    @map("org_id")
+  tenantId         String    @map("tenant_id")
+  invoiceNumber    String    @unique @map("invoice_number")
+  paymentId        String    @map("payment_id")
+  invoiceType      String    @map("invoice_type") // PLAN_PURCHASE, RENEWAL, CREDIT_TOPUP
+  amountPaise      Int       @map("amount_paise")
+  gstAmountPaise   Int       @default(0) @map("gst_amount_paise")
+  totalAmountPaise Int       @map("total_amount_paise")
+  hsnSacCode       String?   @map("hsn_sac_code")
+  pdfPath          String?   @map("pdf_path")
+  createdAt        DateTime  @default(now()) @map("created_at")
+
+  payment BillingPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+
+  @@index([orgId])
+  @@index([tenantId])
+  @@index([invoiceNumber])
+  @@index([paymentId])
+  @@map("billing_invoices")
+}
+
+model BillingAuditLog {
+  id          String    @id @default(cuid())
+  orgId       String    @map("org_id")
+  tenantId    String    @map("tenant_id")
+  actorUserId String?   @map("actor_user_id")
+  action      String    // PLAN_PURCHASED, RENEWAL_SUBSCRIBED, CREDIT_TOPUP, etc.
+  paymentId   String?   @map("payment_id")
+  metadata    Json?
+  ipAddress   String?   @map("ip_address")
+  userAgent   String?   @map("user_agent")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  @@index([orgId])
+  @@index([tenantId])
+  @@index([action])
+  @@index([createdAt(sort: Desc)])
+  @@map("billing_audit_logs")
+}
+
+// ============================================
+// POS FAVORITES & FAST-MOVING
+// ============================================
+
+model PosFavorite {
+  id        Int      @id @default(autoincrement())
+  userId    Int      @map("user_id")
+  drugLibraryId Int? @map("drug_library_id")
+  productId Int?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  drugLibrary DrugLibrary? @relation(fields: [drugLibraryId], references: [id], onDelete: Cascade)
+  product     Product?     @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, drugLibraryId, productId])
+  @@index([userId])
+  @@index([drugLibraryId])
+  @@index([productId])
+  @@map("pos_favorites")
+}
+
+model PosAuditLog {
+  id         Int      @id @default(autoincrement())
+  tenantId   Int      @map("tenant_id")
+  branchId   Int?     @map("branch_id")
+  userId     Int      @map("user_id")
+  action     String   // POS_CHECKOUT, POS_OVERRIDE_PRICE, POS_OVERRIDE_GST, POS_CHANGE_BATCH, POS_DISPENSE_SCHEDULE, POS_REPEAT_LAST_INVOICE
+  payload    Json?    // Additional context (productId, batchId, oldValue, newValue, etc.)
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  @@index([tenantId])
+  @@index([branchId])
+  @@index([userId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("pos_audit_log")
+}
+
+// ============================================
+// OFFLINE POS SYSTEM
+// ============================================
+
+model OfflineEntitlementToken {
+  id                String   @id @default(cuid())
+  tenantId          Int      @map("tenant_id")
+  deviceId          String   @map("device_id")
+  tokenId           String   @unique @map("token_id")
+  status            String   @default("ACTIVE") // ACTIVE, REVOKED, EXPIRED
+  issuedAt          DateTime @default(now()) @map("issued_at")
+  expiresAt         DateTime @map("expires_at")
+  maxOfflineInvoices Int     @default(200) @map("max_offline_invoices")
+  permissionsSnapshot Json?  @map("permissions_snapshot")
+  revokedAt         DateTime? @map("revoked_at")
+  revokedBy         Int?     @map("revoked_by")
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@unique([tenantId, deviceId, status])
+  @@index([tenantId])
+  @@index([deviceId])
+  @@index([tokenId])
+  @@index([status])
+  @@index([expiresAt])
+  @@map("offline_entitlement_tokens")
+}
+
+model OfflineInvoice {
+  id              String   @id @default(cuid())
+  localId         String   @unique @map("local_id")
+  tenantId        Int      @map("tenant_id")
+  deviceId        String   @map("device_id")
+  tokenId         String   @map("token_id")
+  idempotencyKey  String   @unique @map("idempotency_key")
+  invoiceData     Json     @map("invoice_data")
+  status          String   @default("QUEUED") // QUEUED, SYNCING, SYNCED, FAILED, NEEDS_REVIEW
+  serverInvoiceId Int?     @map("server_invoice_id")
+  conflictDetails Json?    @map("conflict_details")
+  syncAttempts    Int      @default(0) @map("sync_attempts")
+  lastSyncAttempt DateTime? @map("last_sync_attempt")
+  syncedAt        DateTime? @map("synced_at")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([tenantId, deviceId])
+  @@index([status])
+  @@index([idempotencyKey])
+  @@index([createdAt])
+  @@map("offline_invoices")
+}
+
+model OfflineEvent {
+  id              String   @id @default(cuid())
+  localId         String   @unique @map("local_id")
+  tenantId        Int      @map("tenant_id")
+  deviceId        String   @map("device_id")
+  tokenId         String   @map("token_id")
+  idempotencyKey  String   @unique @map("idempotency_key")
+  eventType       String   @map("event_type") // STOCK_DECREMENT, PAYMENT, CREDIT_LEDGER
+  eventData       Json     @map("event_data")
+  status          String   @default("QUEUED") // QUEUED, SYNCING, SYNCED, FAILED
+  syncAttempts    Int      @default(0) @map("sync_attempts")
+  lastSyncAttempt DateTime? @map("last_sync_attempt")
+  syncedAt        DateTime? @map("synced_at")
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([tenantId, deviceId])
+  @@index([status])
+  @@index([idempotencyKey])
+  @@index([createdAt])
+  @@map("offline_events")
+}
+
+model SyncAuditLog {
+  id              Int      @id @default(autoincrement())
+  tenantId        Int      @map("tenant_id")
+  deviceId        String   @map("device_id")
+  tokenId         String   @map("token_id")
+  action          String   // TOKEN_ISSUED, TOKEN_REVOKED, SYNC_STARTED, SYNC_COMPLETED, SYNC_FAILED
+  itemsProcessed  Int?     @default(0) @map("items_processed")
+  itemsSucceeded  Int?     @default(0) @map("items_succeeded")
+  itemsFailed     Int?     @default(0) @map("items_failed")
+  itemsReview     Int?     @default(0) @map("items_review")
+  details         Json?    // Additional context
+  errorMessage    String?  @map("error_message")
+  createdAt       DateTime @default(now())
+
+  @@index([tenantId])
+  @@index([deviceId])
+  @@index([tokenId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("sync_audit_log")
+}
+
+// ============================================
+// DRUG INTERACTIONS & COUNSELING
+// ============================================
+
+model DrugInteraction {
+  id              Int      @id @default(autoincrement())
+  drug1Id         Int?     @map("drug1_id") // Product ID or DrugLibrary ID
+  drug1Name       String   @map("drug1_name")
+  drug1Type       String   @default("PRODUCT") @map("drug1_type") // PRODUCT, DRUG_LIBRARY, MOLECULE
+  drug2Id         Int?     @map("drug2_id")
+  drug2Name       String   @map("drug2_name")
+  drug2Type       String   @default("PRODUCT") @map("drug2_type")
+  severity        String   // HIGH, MEDIUM, LOW
+  description     String
+  mechanism       String?
+  recommendation  String?
+  source          String   @default("RULES") // RULES, AI, DATABASE
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  acknowledgements InteractionAcknowledgement[]
+
+  @@unique([drug1Name, drug2Name, severity])
+  @@index([drug1Name])
+  @@index([drug2Name])
+  @@index([severity])
+  @@map("drug_interactions")
+}
+
+model InteractionAcknowledgement {
+  id              Int      @id @default(autoincrement())
+  interactionId   Int      @map("interaction_id")
+  invoiceId       Int?     @map("invoice_id")
+  userId          Int      @map("user_id")
+  tenantId        Int      @map("tenant_id")
+  acknowledgedAt  DateTime @default(now()) @map("acknowledged_at")
+  notes           String?
+
+  interaction DrugInteraction @relation(fields: [interactionId], references: [id], onDelete: Cascade)
+
+  @@index([interactionId])
+  @@index([invoiceId])
+  @@index([userId])
+  @@index([tenantId])
+  @@map("interaction_acknowledgements")
+}
+
+model CounselingPoint {
+  id              Int      @id @default(autoincrement())
+  drugId          Int?     @map("drug_id")
+  drugName        String   @map("drug_name")
+  point           String
+  category        String   // TIMING, FOOD, SIDE_EFFECTS, STORAGE, CONTRAINDICATION
+  priority        Int      @default(100)
+  source          String   @default("RULES") // RULES, AI
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([drugId])
+  @@index([drugName])
+  @@index([category])
+  @@map("counseling_points")
+}
+
+// ============================================
+// AI DRUG INTERACTION CHECKER (ADVANCED)
+// ============================================
+
+model AIDrugInteraction {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  
+  // Drug Information
+  drug1Id           Int?     @map("drug1_id")
+  drug1Name         String   @map("drug1_name")
+  drug1Type         String   @default("PRODUCT") @map("drug1_type") // PRODUCT, DRUG_LIBRARY, MOLECULE
+  drug2Id           Int?     @map("drug2_id")
+  drug2Name         String   @map("drug2_name")
+  drug2Type         String   @default("PRODUCT") @map("drug2_type")
+  
+  // Interaction Details
+  severity          String   // MILD, MODERATE, SEVERE, CONTRAINDICATED
+  severityScore     Decimal  @db.Decimal(5, 2) @map("severity_score") // 0-100
+  description       String
+  mechanism         String?  // Pharmacokinetic, Pharmacodynamic, etc.
+  
+  // Patient-Specific Risk Assessment
+  patientAge        Int?     @map("patient_age")
+  patientGender     String?  @map("patient_gender")
+  patientConditions Json?    @map("patient_conditions") // Array of medical conditions
+  patientAllergies  Json?    @map("patient_allergies") // Array of allergies
+  
+  // Risk Scoring
+  overallRiskScore  Decimal  @db.Decimal(5, 2) @map("overall_risk_score") // 0-100
+  riskFactors       Json?    @map("risk_factors") // Array of risk factors
+  
+  // Alternative Suggestions
+  alternativeDrugs Json?    @map("alternative_drugs") // Array of alternative medications
+  alternativeReason String? @map("alternative_reason")
+  
+  // Additional Interaction Types
+  foodInteraction   Boolean  @default(false) @map("food_interaction")
+  foodInteractionDetails String? @map("food_interaction_details")
+  alcoholInteraction Boolean @default(false) @map("alcohol_interaction")
+  alcoholInteractionDetails String? @map("alcohol_interaction_details")
+  pregnancyWarning  Boolean  @default(false) @map("pregnancy_warning")
+  pregnancyWarningDetails String? @map("pregnancy_warning_details")
+  lactationWarning  Boolean  @default(false) @map("lactation_warning")
+  lactationWarningDetails String? @map("lactation_warning_details")
+  
+  // Disease-Drug Contraindications
+  contraindicatedConditions Json? @map("contraindicated_conditions") // Conditions where this combination is contraindicated
+  
+  // Source and Confidence
+  source            String   @default("AI") // AI, DATABASE, CDSCO, MANUAL
+  confidenceScore   Decimal? @db.Decimal(5, 2) @map("confidence_score") // 0-100
+  verified          Boolean  @default(false)
+  verifiedBy        Int?     @map("verified_by") // User ID
+  verifiedAt        DateTime? @map("verified_at")
+  
+  // Context
+  invoiceId         Int?     @map("invoice_id")
+  prescriptionId    Int?     @map("prescription_id")
+  checkedAt         DateTime @default(now()) @map("checked_at")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([drug1Name])
+  @@index([drug2Name])
+  @@index([severity])
+  @@index([overallRiskScore])
+  @@index([invoiceId])
+  @@index([prescriptionId])
+  @@index([checkedAt])
+  @@map("ai_drug_interactions")
+}
+
+// ============================================
+// AI PRESCRIPTION AUTO-FILL & VERIFICATION
+// ============================================
+
+model AIPrescriptionAutofill {
+  id                Int      @id @default(autoincrement())
+  tenantId          Int      @default(1) @map("tenant_id")
+  prescriptionId    Int?     @map("prescription_id")
+  
+  // OCR Results
+  ocrText           String?  @map("ocr_text")
+  ocrConfidence    Decimal? @db.Decimal(5, 2) @map("ocr_confidence")
+  ocrProvider      String?  @map("ocr_provider") // google, aws, tesseract
+  
+  // Auto-Fill Results
+  autoFillStatus    String   @default("PENDING") @map("auto_fill_status") // PENDING, COMPLETED, PARTIAL, FAILED
+  autoFillConfidence Decimal? @db.Decimal(5, 2) @map("auto_fill_confidence") // 0-100
+  
+  // Extracted Information
+  extractedDrugs    Json?    @map("extracted_drugs") // Array of extracted drugs with details
+  matchedDrugs     Json?    @map("matched_drugs") // Array of matched drugs from library
+  unmatchedDrugs   Json?    @map("unmatched_drugs") // Array of drugs that couldn't be matched
+  
+  // Doctor Information
+  extractedDoctorName String? @map("extracted_doctor_name")
+  extractedDoctorLicense String? @map("extracted_doctor_license")
+  doctorVerified   Boolean  @default(false) @map("doctor_verified")
+  
+  // Dosage Verification
+  dosageVerified   Boolean  @default(false) @map("dosage_verified")
+  dosageWarnings   Json?    @map("dosage_warnings") // Array of dosage warnings
+  unusualDosages   Json?    @map("unusual_dosages") // Array of unusual dosages detected
+  
+  // Generic Suggestions
+  genericSuggestions Json?  @map("generic_suggestions") // Array of generic alternatives
+  
+  // Prescription Completeness
+  completenessScore Decimal? @db.Decimal(5, 2) @map("completeness_score") // 0-100
+  missingFields     Json?    @map("missing_fields") // Array of missing required fields
+  
+  // Verification Flags
+  requiresReview    Boolean  @default(false) @map("requires_review")
+  reviewReason     String?  @map("review_reason")
+  reviewedBy       Int?     @map("reviewed_by") // User ID
+  reviewedAt        DateTime? @map("reviewed_at")
+  
+  // Processing Metadata
+  processedAt       DateTime @default(now()) @map("processed_at")
+  processingTimeMs Int?     @map("processing_time_ms")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([prescriptionId])
+  @@index([autoFillStatus])
+  @@index([requiresReview])
+  @@index([processedAt])
+  @@map("ai_prescription_autofill")
+}
+
+// ============================================
+// ENTERPRISE LICENSING ENFORCEMENT (1 PC + 1 IP)
+// ============================================
+
+enum LicenseStatus {
+  active
+  suspended
+  expired
+  pending_renewal
+}
+
+enum IpPolicy {
+  single
+  cidr
+}
+
+enum DeviceType {
+  web
+  windows
+  mac
+  android
+  ios
+}
+
+enum IpChangeStatus {
+  pending
+  approved
+  rejected
+}
+
+model License {
+  id                String        @id @default(cuid())
+  tenantId          String        @unique // One active license per tenant
+  subscriberId      String?       @map("subscriber_id") // User/tenant identifier (alias for tenantId, kept for compatibility)
+  licenceKey        String?       @unique @map("licence_key") // Generated secret for validation
+  registeredDeviceFingerprint String? @map("registered_device_fingerprint") // Hashed device fingerprint
+  registeredIp      String?       @map("registered_ip") // Registered IP address
+  expiresAt         DateTime?     @map("expires_at") // Annual subscription expiry
+  renewalCode       String?       @unique @map("renewal_code") // Generated when licence expires
+  plan              String        @default("professional")
+  licenseType       LicenseType?  @default(MONTHLY) @map("license_type")
+  status            LicenseStatus @default(active)
+  maxDevices        Int           @default(1) @map("max_devices") // Enforce 1 PC
+  maxPcDevices      Int           @default(1) @map("max_pc_devices")
+  maxMobileDevices  Int           @default(1) @map("max_mobile_devices")
+  ipPolicy          IpPolicy      @default(single) @map("ip_policy") // single | cidr (future)
+  allowedIp         String?       @map("allowed_ip") // inet - single IP for now (alias for registeredIp)
+  allowedCidr       String?       @map("allowed_cidr") // cidr - future use
+  trialEndsAt       DateTime?     @map("trial_ends_at")
+  subscriptionId   String?        @map("subscription_id") // Stripe/subscription ID
+  billingEmail      String?       @map("billing_email")
+  lastCheckinAt     DateTime?     @map("last_checkin_at")
+  
+  // Grace period support
+  gracePeriodDays     Int?      @default(7) @map("grace_period_days")
+  graceUntil          DateTime? @map("grace_until")
+  
+  // Validation tracking
+  lastValidatedAt     DateTime? @map("last_validated_at")
+  validationCount     Int       @default(0) @map("validation_count")
+  
+  // Renewal workflow
+  adminNotes          String?   @map("admin_notes")
+  paymentReferenceId  String?   @map("payment_reference_id")
+  renewalRequestedAt  DateTime? @map("renewal_requested_at")
+  
+  // Violation tracking
+  lastViolationAt     DateTime? @map("last_violation_at")
+  violationCount      Int       @default(0) @map("violation_count")
+  
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  deviceRegistrations DeviceRegistration[]
+  ipChangeRequests    IpChangeRequest[]
+  auditLogs           LicenseAuditLog[]
+  violations          LicenseViolation[]
+  entitlements        LicenseEntitlement[]
+  licenseDevices      LicenseDevice[]
+  licenseEvents       LicenseEvent[]
+
+  @@index([tenantId])
+  @@index([subscriberId])
+  @@index([licenceKey])
+  @@index([status])
+  @@index([renewalCode])
+  @@index([expiresAt])
+  @@index([lastViolationAt])
+  @@map("licenses")
+}
+
+model DeviceRegistration {
+  id            String      @id @default(cuid())
+  tenantId      String      @map("tenant_id")
+  userId        String?     @map("user_id") // User ID from auth (string)
+  deviceId      String      @map("device_id") // Stable device identifier
+  deviceType    DeviceType  @default(web) @map("device_type")
+  deviceLabel   String?     @map("device_label") // "Front Desk PC"
+  registeredIp  String?     @map("registered_ip") // inet
+  operatingSystem String?   @map("operating_system") // Windows, macOS, Linux, etc.
+  browser         String?   @map("browser") // Chrome, Firefox, Safari, etc.
+  userAgent       String?   @map("user_agent") // Full user agent string
+  registeredAt  DateTime    @default(now()) @map("registered_at")
+  lastSeenAt    DateTime    @default(now()) @map("last_seen_at")
+  revokedAt     DateTime?   @map("revoked_at")
+
+  license License @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+
+  @@unique([tenantId, deviceId])
+  @@index([tenantId, revokedAt])
+  @@index([deviceId])
+  @@index([lastSeenAt])
+  @@map("device_registrations")
+}
+
+// Partial unique index: only one active device per tenant
+// This is enforced at application level since Prisma doesn't support partial unique indexes directly
+// We'll use a unique constraint on (tenantId) WHERE revoked_at IS NULL in migration
+
+model IpChangeRequest {
+  id                String          @id @default(cuid())
+  tenantId          String          @map("tenant_id")
+  requestedByUserId  String          @map("requested_by_user_id")
+  newIp             String          @map("new_ip") // inet
+  reason            String?         // Reason for IP change request
+  status            IpChangeStatus  @default(pending)
+  approvedByUserId   String?         @map("approved_by_user_id")
+  approvedAt         DateTime?       @map("approved_at")
+  rejectionReason   String?          @map("rejection_reason")
+  createdAt          DateTime        @default(now())
+
+  license License @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([status])
+  @@index([createdAt])
+  @@map("ip_change_requests")
+}
+
+model LicenseAuditLog {
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  licenceId     String?  @map("licence_id") // Reference to license id
+  actorUserId   String?  @map("actor_user_id") // performed_by - user id
+  action        String   // register_device, deregister_device, set_ip, renew_request, renew_approve, renew_reject, LICENSE_CHECKED, etc.
+  notes         String?  // Optional text notes
+  meta          Json?    // { ip, device_id, reason, user_agent, route, etc. }
+  createdAt     DateTime @default(now()) // timestamp
+
+  license License? @relation(fields: [tenantId], references: [tenantId], onDelete: Cascade)
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([licenceId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("license_audit_logs")
+}
+
+// License Violations (for tracking misuse)
+model LicenseViolation {
+  id            String   @id @default(cuid())
+  tenantId      String   @map("tenant_id")
+  licenceId     String   @map("licence_id")
+  violationType String   @map("violation_type") // DEVICE_MISMATCH, IP_MISMATCH, EXPIRED, SUSPENDED, etc.
+  reason        String
+  ipAddress     String?  @map("ip_address")
+  deviceId      String?  @map("device_id")
+  deviceFingerprint String? @map("device_fingerprint")
+  userAgent     String?  @map("user_agent")
+  createdAt     DateTime @default(now())
+
+  license License @relation(fields: [licenceId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([licenceId])
+  @@index([violationType])
+  @@index([createdAt])
+  @@map("license_violations")
+}
+
+// ============================================
+// ENTERPRISE SECURITY: RBAC, STEP-UP AUTH, AUDIT
+// ============================================
+
+enum SystemRole {
+  OWNER
+  ADMIN
+  PHARMACIST
+  CASHIER
+  INVENTORY
+  AUDITOR
+}
+
+enum Permission {
+  REFUND_CREATE
+  DISCOUNT_OVERRIDE
+  PRICE_EDIT
+  STOCK_ADJUST
+  GST_EDIT
+  EXPORT_DATA
+  USER_MANAGE
+  LICENSE_MANAGE
+  APPROVE_ACTIONS
+  VIEW_AUDIT
+  SUPPORT_ACCESS
+  ANALYTICS_VIEW
+  ANALYTICS_VIEW_REVENUE
+  ANALYTICS_VIEW_SALES
+  ANALYTICS_VIEW_PRODUCTS
+  ANALYTICS_EXPORT
+}
+
+enum StepUpMethod {
+  PASSWORD
+  TOTP
+  MAGIC_LINK
+}
+
+enum PendingActionStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  EXPIRED
+}
+
+enum SupportSessionScope {
+  READ_ONLY
+  DIAGNOSTICS
+}
+
+// RBAC: Roles and Permissions
+model Role {
+  id          String   @id @default(cuid())
+  name        SystemRole @unique
+  displayName String   @map("display_name")
+  description String?
+  isSystem    Boolean  @default(true) @map("is_system") // System roles cannot be deleted
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  permissions RolePermission[]
+  userRoles   UserRole[]
+
+  @@map("roles")
+}
+
+model PermissionDef {
+  id          String     @id @default(cuid())
+  name        Permission @unique
+  displayName String     @map("display_name")
+  description String?
+  category    String?    // e.g., "FINANCIAL", "INVENTORY", "ADMIN", "ANALYTICS"
+  createdAt   DateTime   @default(now())
+
+  rolePermissions RolePermission[]
+  userPermissions UserPermission[]
+
+  @@map("permissions")
+}
+
+model RolePermission {
+  id           String        @id @default(cuid())
+  roleId       String        @map("role_id")
+  permissionId String        @map("permission_id")
+  createdAt    DateTime      @default(now())
+
+  role       Role          @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission PermissionDef @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+  @@index([permissionId])
+  @@map("role_permissions")
+}
+
+// Tenant-scoped user roles
+model UserRole {
+  id        String   @id @default(cuid())
+  tenantId  String   @map("tenant_id")
+  userId    String   @map("user_id") // User ID from auth system
+  roleId    String   @map("role_id")
+  assignedBy String? @map("assigned_by") // User who assigned this role
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId, roleId])
+  @@index([tenantId, userId])
+  @@index([roleId])
+  @@map("user_roles")
+}
+
+// User-specific permissions (granted by Owner)
+model UserPermission {
+  id          String    @id @default(cuid())
+  tenantId    String    @map("tenant_id")
+  userId      String    @map("user_id")
+  permissionId String   @map("permission_id")
+  grantedBy   String    @map("granted_by") // Owner who granted
+  createdAt   DateTime  @default(now()) @map("created_at")
+  revokedAt   DateTime? @map("revoked_at")
+  revokedBy   String?   @map("revoked_by")
+
+  permission PermissionDef @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId, permissionId])
+  @@index([tenantId, userId])
+  @@index([permissionId])
+  @@index([revokedAt])
+  @@map("user_permissions")
+}
+
+// Step-up Authentication
+model StepUpSession {
+  id            String        @id @default(cuid())
+  tenantId      String        @map("tenant_id")
+  userId        String        @map("user_id")
+  method        StepUpMethod
+  purpose       String?       @default("general") // general, analytics_unlock, export, etc.
+  challengeId   String?       @unique @map("challenge_id")
+  token         String?       // Analytics unlock token (JWT)
+  verifiedAt    DateTime?     @map("verified_at")
+  expiresAt     DateTime      @map("expires_at") // 12-24h for analytics_unlock, 10min for general
+  ipAddress     String?       @map("ip_address")
+  userAgent     String?       @map("user_agent")
+  deviceId      String?       @map("device_id")
+  failedAttempts Int         @default(0) @map("failed_attempts")
+  lockedUntil   DateTime?     @map("locked_until")
+  createdAt     DateTime      @default(now())
+
+  @@index([tenantId, userId, expiresAt])
+  @@index([purpose])
+  @@index([expiresAt])
+  @@index([challengeId])
+  @@map("step_up_sessions")
+}
+
+// Maker-Checker Approvals (4-eyes principle)
+model PendingAction {
+  id          String              @id @default(cuid())
+  tenantId    String              @map("tenant_id")
+  actionType  String              @map("action_type") // REFUND, DISCOUNT, EXPORT, etc.
+  payloadJson Json                @map("payload_json")
+  createdBy   String              @map("created_by")
+  status      PendingActionStatus @default(PENDING)
+  approvedBy   String?            @map("approved_by")
+  rejectedBy   String?            @map("rejected_by")
+  rejectionReason String?          @map("rejection_reason")
+  executedAt  DateTime?           @map("executed_at")
+  createdAt   DateTime            @default(now())
+  approvedAt  DateTime?           @map("approved_at")
+  expiresAt   DateTime?           @map("expires_at") // Optional expiration
+
+  @@index([tenantId, status])
+  @@index([createdBy])
+  @@index([actionType])
+  @@index([createdAt])
+  @@map("pending_actions")
+}
+
+// Tamper-evident Audit Logs (hash chaining)
+model SecurityAuditLog {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  actorUserId String?  @map("actor_user_id")
+  action      String   // Action type
+  meta        Json?    // Additional context
+  prevHash    String?  @map("prev_hash") // Hash of previous log entry for this tenant
+  hash        String   // SHA-256(prev_hash + tenant_id + actor + action + meta + created_at)
+  createdAt   DateTime @default(now())
+
+  @@unique([tenantId, createdAt, hash]) // Ensure uniqueness for hash chain
+  @@index([tenantId, createdAt(sort: Desc)])
+  @@index([actorUserId])
+  @@index([action])
+  @@index([hash])
+  @@map("security_audit_logs")
+}
+
+// Export Controls
+model ExportRecord {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  userId      String   @map("user_id")
+  exportType  String   @map("export_type") // INVOICE, CUSTOMER, GST_REPORT, etc.
+  exportId    String   @unique @map("export_id") // Unique export identifier for watermarking
+  filePath    String?  @map("file_path")
+  watermark   Json     // { tenant_id, user_id, timestamp, export_type, export_id }
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  createdAt   DateTime @default(now())
+
+  @@index([tenantId, userId])
+  @@index([exportType])
+  @@index([createdAt])
+  @@index([exportId])
+  @@map("export_records")
+}
+
+// Support Mode (consent-based, time-bound)
+model SupportSession {
+  id          String            @id @default(cuid())
+  tenantId    String            @map("tenant_id")
+  enabledBy   String            @map("enabled_by") // Owner user ID
+  scope       SupportSessionScope @default(READ_ONLY)
+  expiresAt   DateTime          @map("expires_at")
+  supportUserId String?         @map("support_user_id") // Support account user ID
+  isActive    Boolean           @default(true) @map("is_active")
+  createdAt   DateTime          @default(now())
+  revokedAt   DateTime?         @map("revoked_at")
+
+  @@index([tenantId, isActive, expiresAt])
+  @@index([enabledBy])
+  @@map("support_sessions")
+}
+
+// Security Configuration (thresholds, rate limits)
+model SecurityConfig {
+  id                    String   @id @default(cuid())
+  tenantId              String   @unique @map("tenant_id")
+  refundThreshold       Decimal? @db.Decimal(12, 2) @map("refund_threshold") // Require approval above this
+  discountThreshold     Decimal? @db.Decimal(5, 2) @map("discount_threshold") // Require approval above this %
+  exportRateLimit       Int      @default(10) @map("export_rate_limit") // Exports per hour per user
+  stepUpTimeoutMinutes  Int      @default(10) @map("step_up_timeout_minutes")
+  supportSessionMinutes Int      @default(30) @map("support_session_minutes")
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@map("security_configs")
+}
+
+// Mobile App Statistics (real data tracking)
+model AppStats {
+  id              String   @id @default(cuid())
+  activeUsers     Int      @default(0) @map("active_users")
+  appRating       Decimal? @db.Decimal(3, 1) @map("app_rating") // 0.0 to 5.0
+  totalDownloads  Int      @default(0) @map("total_downloads")
+  uptimePercent   Decimal? @db.Decimal(5, 2) @map("uptime_percent") // 0.00 to 100.00
+  lastUpdated     DateTime @default(now()) @map("last_updated")
+  updatedBy       String?  @map("updated_by") // User who last updated
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("app_stats")
+}
+
+// ============================================
+// SECURITY HARDENING: AUTH & SESSION MANAGEMENT
+// ============================================
+
+enum LicenseType {
+  TRIAL
+  MONTHLY
+  ANNUAL
+  LIFETIME
+}
+
+enum DeviceBindingType {
+  pc
+  mobile
+}
+
+// Refresh Tokens (for JWT rotation)
+model RefreshToken {
+  id            String    @id @default(cuid())
+  userId        String    @map("user_id")
+  tenantId      String    @map("tenant_id")
+  tokenHash     String    @unique @map("token_hash") // SHA-256 hash
+  deviceId      String?   @map("device_id")
+  deviceType    String?   @map("device_type") // web, windows, mac, android, ios
+  ipAddress     String?   @map("ip_address") @db.Inet
+  userAgent     String?   @map("user_agent")
+  expiresAt     DateTime  @map("expires_at")
+  revokedAt     DateTime? @map("revoked_at")
+  revokedBy     String?   @map("revoked_by")
+  revokedReason String?   @map("revoked_reason")
+  createdAt     DateTime  @default(now()) @map("created_at")
+  lastUsedAt    DateTime? @map("last_used_at")
+
+  tenant         Tenant           @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  activeSessions ActiveSession[]  @relation("RefreshTokenToActiveSession")
+
+  @@index([userId])
+  @@index([tenantId])
+  @@index([tokenHash])
+  @@index([expiresAt])
+  @@index([deviceId])
+  @@map("refresh_tokens")
+}
+
+// Active Sessions
+model ActiveSession {
+  id              String        @id @default(cuid())
+  userId          String        @map("user_id")
+  tenantId        String        @map("tenant_id")
+  refreshTokenId  String?       @map("refresh_token_id")
+  deviceId        String?       @map("device_id")
+  deviceType      String?       @map("device_type")
+  ipAddress       String?       @map("ip_address") @db.Inet
+  userAgent       String?       @map("user_agent")
+  lastActivityAt  DateTime      @default(now()) @map("last_activity_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  expiresAt       DateTime      @map("expires_at")
+
+  refreshToken RefreshToken? @relation("RefreshTokenToActiveSession", fields: [refreshTokenId], references: [id], onDelete: Cascade)
+  tenant       Tenant       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tenantId])
+  @@index([refreshTokenId])
+  @@index([expiresAt])
+  @@index([deviceId])
+  @@map("active_sessions")
+}
+
+// MFA Secrets (TOTP)
+model MfaSecret {
+  id          String    @id @default(cuid())
+  userId      String    @map("user_id")
+  tenantId    String    @map("tenant_id")
+  secret      String    // Encrypted TOTP secret
+  backupCodes String[]  @map("backup_codes") // Encrypted backup codes
+  isEnabled   Boolean   @default(false) @map("is_enabled")
+  enabledAt   DateTime? @map("enabled_at")
+  lastUsedAt  DateTime? @map("last_used_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tenantId])
+  @@index([userId])
+  @@index([tenantId])
+  @@map("mfa_secrets")
+}
+
+// Account Lockout Tracking
+model AccountLockout {
+  id             String    @id @default(cuid())
+  userId         String    @map("user_id")
+  tenantId       String    @map("tenant_id")
+  email          String    // For lookup by email
+  failedAttempts Int       @default(0) @map("failed_attempts")
+  lockedUntil    DateTime? @map("locked_until")
+  lastFailedAt   DateTime? @map("last_failed_at")
+  lastFailedIp   String?   @map("last_failed_ip") @db.Inet
+  createdAt      DateTime  @default(now()) @map("created_at")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, tenantId])
+  @@index([userId])
+  @@index([email])
+  @@index([lockedUntil])
+  @@map("account_lockouts")
+}
+
+// Password Reset Tokens
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String    @map("user_id")
+  tenantId  String    @map("tenant_id")
+  tokenHash String    @unique @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  usedAt    DateTime? @map("used_at")
+  ipAddress String?   @map("ip_address") @db.Inet
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([tokenHash])
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
+}
+
+// ============================================
+// ENHANCED LICENSING SYSTEM
+// ============================================
+
+// License Entitlements (signed, short-lived tokens)
+model LicenseEntitlement {
+  id              String    @id @default(cuid())
+  tenantId        String    @map("tenant_id")
+  licenseId       String    @map("license_id")
+  deviceId        String    @map("device_id")
+  entitlementToken String  @unique @map("entitlement_token") // Signed JWT-like token
+  signature       String    // HMAC signature
+  expiresAt       DateTime  @map("expires_at")
+  issuedAt        DateTime  @default(now()) @map("issued_at")
+  revokedAt       DateTime? @map("revoked_at")
+  lastValidatedAt DateTime? @map("last_validated_at")
+
+  license License @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([licenseId])
+  @@index([deviceId])
+  @@index([entitlementToken])
+  @@index([expiresAt])
+  @@map("license_entitlements")
+}
+
+// License Devices (strict binding: 1 PC + 1 mobile)
+model LicenseDevice {
+  id            String            @id @default(cuid())
+  tenantId      String            @map("tenant_id")
+  licenseId     String            @map("license_id")
+  deviceId      String            @map("device_id")
+  deviceType    DeviceBindingType @map("device_type") // pc or mobile
+  deviceSecret  String            @map("device_secret") // Server-issued secret
+  deviceLabel   String?           @map("device_label")
+  platform      String?           // windows, mac, linux, android, ios, web
+  appVersion    String?           @map("app_version")
+  registeredAt  DateTime          @default(now()) @map("registered_at")
+  lastSeenAt    DateTime          @default(now()) @map("last_seen_at")
+  revokedAt     DateTime?         @map("revoked_at")
+  revokedBy     String?           @map("revoked_by")
+  revokedReason String?           @map("revoked_reason")
+
+  license License @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, deviceId])
+  @@index([tenantId])
+  @@index([licenseId])
+  @@index([deviceId])
+  @@index([deviceType])
+  @@index([revokedAt])
+  @@map("license_devices")
+}
+
+// Device Reset Cooldowns
+model DeviceResetCooldown {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  userId      String   @map("user_id")
+  deviceType  String   @map("device_type")
+  resetCount  Int      @default(1) @map("reset_count")
+  lastResetAt DateTime @default(now()) @map("last_reset_at")
+  cooldownUntil DateTime? @map("cooldown_until")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId, deviceType])
+  @@index([tenantId])
+  @@index([cooldownUntil])
+  @@map("device_reset_cooldowns")
+}
+
+// License Events (lifecycle tracking)
+model LicenseEvent {
+  id          String   @id @default(cuid())
+  tenantId    String   @map("tenant_id")
+  licenseId   String   @map("license_id")
+  eventType   String   @map("event_type") // ACTIVATED, RENEWED, SUSPENDED, REVOKED, EXPIRED, PAST_DUE, DEVICE_ADDED, DEVICE_REMOVED
+  actorUserId String?  @map("actor_user_id")
+  metadata    Json?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  license License @relation(fields: [licenseId], references: [id], onDelete: Cascade)
+  tenant  Tenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@index([licenseId])
+  @@index([eventType])
+  @@index([createdAt])
+  @@map("license_events")
+}
+
+// ============================================
+// AI-DRIVEN SECURITY FEATURES
+// ============================================
+
+model AISecurityThreat {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  userId            String?  @map("user_id")
+  
+  threatType        String   @map("threat_type") // LOGIN_ANOMALY, BEHAVIORAL_ANOMALY, SUSPICIOUS_ACTIVITY, DEVICE_ANOMALY
+  riskScore         Decimal  @db.Decimal(5, 2) @map("risk_score") // 0-100
+  severity          String   @map("severity") // LOW, MEDIUM, HIGH, CRITICAL
+  
+  // Threat Details
+  ipAddress         String?  @map("ip_address") @db.Inet
+  deviceId          String?  @map("device_id")
+  userAgent         String?  @map("user_agent")
+  location          String?  // Country/City from IP geolocation
+  
+  // Anomaly Detection
+  isLoginAnomaly    Boolean  @default(false) @map("is_login_anomaly")
+  isBehavioralAnomaly Boolean @default(false) @map("is_behavioral_anomaly")
+  isTimeAnomaly     Boolean  @default(false) @map("is_time_anomaly")
+  isLocationAnomaly Boolean  @default(false) @map("is_location_anomaly")
+  
+  // Behavioral Biometrics
+  typingPattern     Json?    @map("typing_pattern") // Typing speed, rhythm
+  mousePattern      Json?    @map("mouse_pattern") // Mouse movement patterns
+  
+  // Action Taken
+  status            String   @default("DETECTED") @map("status") // DETECTED, REVIEWED, BLOCKED, FALSE_POSITIVE
+  autoBlocked       Boolean  @default(false) @map("auto_blocked")
+  reviewedBy        String?  @map("reviewed_by")
+  reviewedAt        DateTime? @map("reviewed_at")
+  
+  threatDetails     Json?    @map("threat_details")
+  reasoning         String?  // AI reasoning for threat detection
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([userId])
+  @@index([riskScore])
+  @@index([severity])
+  @@index([status])
+  @@index([createdAt])
+  @@map("ai_security_threats")
+}
+
+model AIPermissionRecommendation {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  userId            String   @map("user_id")
+  
+  recommendationType String  @map("recommendation_type") // GRANT, REVOKE, MODIFY
+  permission        String   // Permission code
+  currentStatus     String   @map("current_status") // GRANTED, DENIED
+  recommendedStatus String   @map("recommended_status") // GRANTED, DENIED
+  
+  // Usage Analytics
+  lastUsedAt        DateTime? @map("last_used_at")
+  usageCount        Int      @default(0) @map("usage_count")
+  daysSinceLastUse  Int?     @map("days_since_last_use")
+  
+  // Anomaly Detection
+  isAnomalousUsage  Boolean  @default(false) @map("is_anomalous_usage")
+  anomalyReason     String?  @map("anomaly_reason")
+  
+  // Recommendation
+  confidenceScore   Decimal  @db.Decimal(5, 2) @map("confidence_score") // 0-100
+  reasoning         String?  // Why this recommendation
+  
+  applied           Boolean  @default(false)
+  appliedAt         DateTime? @map("applied_at")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([userId])
+  @@index([recommendationType])
+  @@index([applied])
+  @@map("ai_permission_recommendations")
+}
+
+model AILicenseCompliance {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  licenseId         String   @map("license_id")
+  
+  analysisDate      DateTime @default(now()) @map("analysis_date")
+  
+  // Usage Prediction
+  predictedUsage    Int?     @map("predicted_usage") // Predicted usage in next 30 days
+  currentUsage      Int      @default(0) @map("current_usage")
+  usageLimit        Int      @map("usage_limit")
+  daysToExceedLimit Int?     @map("days_to_exceed_limit")
+  
+  // Compliance Risk
+  complianceScore   Decimal  @db.Decimal(5, 2) @map("compliance_score") // 0-100
+  riskLevel         String   @map("risk_level") // LOW, MEDIUM, HIGH, CRITICAL
+  
+  // Violations
+  deviceViolations  Int      @default(0) @map("device_violations")
+  ipViolations      Int      @default(0) @map("ip_violations")
+  recentViolations  Json?    @map("recent_violations") // Array of recent violations
+  
+  // Recommendations
+  recommendedTier   String?  @map("recommended_tier")
+  costSavings       Decimal? @db.Decimal(12, 2) @map("cost_savings") // Potential savings
+  
+  reasoning         String?  // AI reasoning
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([licenseId])
+  @@index([complianceScore])
+  @@index([riskLevel])
+  @@map("ai_license_compliance")
+}
+
+model AIDeviceFingerprint {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  userId            String?  @map("user_id")
+  deviceId          String   @map("device_id")
+  
+  // Fingerprint Components
+  browserFingerprint String  @map("browser_fingerprint") // Canvas, WebGL, AudioContext hash
+  hardwareFingerprint String? @map("hardware_fingerprint") // CPU, GPU, screen resolution
+  networkFingerprint String? @map("network_fingerprint") // IP, timezone, language
+  
+  // Trust Scoring
+  trustScore        Decimal  @db.Decimal(5, 2) @map("trust_score") // 0-100
+  trustLevel        String   @map("trust_level") // TRUSTED, SUSPICIOUS, UNTRUSTED
+  
+  // Device Characteristics
+  browser           String?
+  os                String?
+  platform          String?
+  screenResolution  String?  @map("screen_resolution")
+  timezone          String?
+  language          String?
+  
+  // Similarity Detection
+  similarDevices    Json?    @map("similar_devices") // Array of similar device IDs
+  similarityScore   Decimal? @db.Decimal(5, 2) @map("similarity_score")
+  
+  // Anomaly Detection
+  isSuspicious      Boolean  @default(false) @map("is_suspicious")
+  suspiciousReasons Json?    @map("suspicious_reasons")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([deviceId])
+  @@index([trustScore])
+  @@index([trustLevel])
+  @@map("ai_device_fingerprints")
+}
+
+model AISecurityAudit {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  auditDate         DateTime @default(now()) @map("audit_date")
+  auditType         String   @map("audit_type") // MONTHLY, QUARTERLY, ANNUAL, ON_DEMAND
+  
+  // Security Score
+  overallScore      Decimal  @db.Decimal(5, 2) @map("overall_score") // 0-100
+  previousScore     Decimal? @db.Decimal(5, 2) @map("previous_score")
+  scoreChange       Decimal? @db.Decimal(5, 2) @map("score_change")
+  
+  // Vulnerability Detection
+  vulnerabilitiesFound Int   @default(0) @map("vulnerabilities_found")
+  vulnerabilities     Json?  // Array of vulnerabilities
+  
+  // Compliance Gap Analysis
+  complianceGaps    Json?    @map("compliance_gaps") // GDPR, HIPAA, etc.
+  complianceScore   Decimal? @db.Decimal(5, 2) @map("compliance_score")
+  
+  // Security Trends
+  trends            Json?    // Security trends analysis
+  recommendations   Json?    // Array of recommendations
+  
+  // Report
+  reportUrl         String?  @map("report_url")
+  reportGeneratedAt DateTime? @map("report_generated_at")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([auditDate])
+  @@index([auditType])
+  @@map("ai_security_audits")
+}
+
+// ============================================
+// AI-DRIVEN BILLING FEATURES
+// ============================================
+
+model AICostForecast {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  forecastDate      DateTime @default(now()) @map("forecast_date")
+  forecastPeriod    String   @map("forecast_period") // WEEKLY, MONTHLY, QUARTERLY, YEARLY
+  
+  // Cost Predictions
+  predictedCostPaise Int     @map("predicted_cost_paise")
+  currentCostPaise   Int     @map("current_cost_paise")
+  previousCostPaise  Int?    @map("previous_cost_paise")
+  
+  // Cost Breakdown
+  subscriptionCostPaise Int  @default(0) @map("subscription_cost_paise")
+  creditsCostPaise      Int  @default(0) @map("credits_cost_paise")
+  addonsCostPaise       Int  @default(0) @map("addons_cost_paise")
+  
+  // Anomaly Detection
+  isAnomaly         Boolean  @default(false) @map("is_anomaly")
+  anomalyReason     String?  @map("anomaly_reason")
+  
+  // Budget Alerts
+  budgetLimitPaise  Int?     @map("budget_limit_paise")
+  budgetAlertLevel  String?  @map("budget_alert_level") // NONE, WARNING, CRITICAL
+  
+  // Optimization
+  optimizationSuggestions Json? @map("optimization_suggestions")
+  potentialSavingsPaise   Decimal? @db.Decimal(12, 2) @map("potential_savings_paise")
+  
+  confidenceScore   Decimal  @db.Decimal(5, 2) @map("confidence_score")
+  reasoning         String?
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([forecastDate])
+  @@index([forecastPeriod])
+  @@map("ai_cost_forecasts")
+}
+
+model AIInvoiceAnalysis {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  invoiceId         String   @map("invoice_id")
+  
+  analysisDate      DateTime @default(now()) @map("analysis_date")
+  
+  // Categorization
+  category          String?  // SUBSCRIPTION, CREDITS, ADDONS, RENEWAL, etc.
+  subcategory       String?  // More specific category
+  
+  // Anomaly Detection
+  isAnomaly         Boolean  @default(false) @map("is_anomaly")
+  anomalyType       String?  @map("anomaly_type") // DUPLICATE, INFLATED, UNUSUAL_AMOUNT
+  anomalyScore      Decimal? @db.Decimal(5, 2) @map("anomaly_score")
+  
+  // Duplicate Detection
+  isDuplicate       Boolean  @default(false) @map("is_duplicate")
+  duplicateInvoiceIds Json?  @map("duplicate_invoice_ids")
+  similarityScore   Decimal? @db.Decimal(5, 2) @map("similarity_score")
+  
+  // Summarization
+  summary           String?  // AI-generated summary
+  keyPoints         Json?    @map("key_points") // Array of key points
+  
+  // Search Keywords
+  searchKeywords    Json?    @map("search_keywords") // Extracted keywords for search
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([invoiceId])
+  @@index([category])
+  @@index([isAnomaly])
+  @@map("ai_invoice_analyses")
+}
+
+model AIPaymentRisk {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  paymentId         String   @map("payment_id")
+  
+  analysisDate      DateTime @default(now()) @map("analysis_date")
+  
+  // Risk Scoring
+  riskScore         Decimal  @db.Decimal(5, 2) @map("risk_score") // 0-100
+  riskLevel         String   @map("risk_level") // LOW, MEDIUM, HIGH, CRITICAL
+  
+  // Anomaly Detection
+  isAnomaly         Boolean  @default(false) @map("is_anomaly")
+  anomalyType       String?  @map("anomaly_type") // AMOUNT, TIMING, PATTERN, METHOD
+  
+  // Chargeback Prediction
+  chargebackProbability Decimal? @db.Decimal(5, 2) @map("chargeback_probability") // 0-100
+  isHighChargebackRisk Boolean @default(false) @map("is_high_chargeback_risk")
+  
+  // Payment Pattern
+  paymentPattern    Json?    @map("payment_pattern") // Analysis of payment patterns
+  deviationFromNorm Decimal? @db.Decimal(5, 2) @map("deviation_from_norm")
+  
+  // Recommendations
+  recommendations   Json?    // Array of recommendations
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([paymentId])
+  @@index([riskScore])
+  @@index([riskLevel])
+  @@map("ai_payment_risks")
+}
+
+model AISubscriptionHealth {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  subscriptionId    String   @map("subscription_id")
+  
+  analysisDate      DateTime @default(now()) @map("analysis_date")
+  
+  // Health Scoring
+  healthScore       Decimal  @db.Decimal(5, 2) @map("health_score") // 0-100
+  healthLevel       String   @map("health_level") // EXCELLENT, GOOD, FAIR, POOR, CRITICAL
+  
+  // Churn Prediction
+  churnProbability  Decimal  @db.Decimal(5, 2) @map("churn_probability") // 0-100
+  churnRiskLevel    String   @map("churn_risk_level") // LOW, MEDIUM, HIGH, CRITICAL
+  daysToChurn       Int?     @map("days_to_churn")
+  
+  // Usage Analysis
+  usageTrend        String?  @map("usage_trend") // INCREASING, DECREASING, STABLE
+  usageScore        Decimal? @db.Decimal(5, 2) @map("usage_score")
+  
+  // Plan Recommendations
+  recommendedPlan   String?  @map("recommended_plan")
+  recommendedAction String?  @map("recommended_action") // UPGRADE, DOWNGRADE, MAINTAIN
+  costSavings       Decimal? @db.Decimal(12, 2) @map("cost_savings")
+  
+  // Renewal Timing
+  optimalRenewalDate DateTime? @map("optimal_renewal_date")
+  renewalRecommendation String? @map("renewal_recommendation")
+  
+  reasoning         String?
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([subscriptionId])
+  @@index([healthScore])
+  @@index([churnProbability])
+  @@map("ai_subscription_health")
+}
+
+model AICreditOptimization {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  analysisDate      DateTime @default(now()) @map("analysis_date")
+  
+  // Usage Prediction
+  predictedUsage    Int      @map("predicted_usage") // Credits predicted for next period
+  currentBalance    Int      @map("current_balance")
+  daysUntilDepletion Int?    @map("days_until_depletion")
+  
+  // Waste Detection
+  wastedCredits     Int      @default(0) @map("wasted_credits")
+  wastePercentage   Decimal? @db.Decimal(5, 2) @map("waste_percentage")
+  wasteReasons      Json?    @map("waste_reasons")
+  
+  // Purchase Timing
+  optimalPurchaseDate DateTime? @map("optimal_purchase_date")
+  recommendedPurchaseAmount Int? @map("recommended_purchase_amount")
+  
+  // Allocation Recommendations
+  allocationRecommendations Json? @map("allocation_recommendations")
+  
+  confidenceScore   Decimal  @db.Decimal(5, 2) @map("confidence_score")
+  reasoning         String?
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([analysisDate])
+  @@map("ai_credit_optimizations")
+}
+
+// ============================================
+// ADVANCED BILLING CONTROLS
+// ============================================
+
+model Budget {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  budgetType        String   @map("budget_type") // MONTHLY, ANNUAL, PER_CATEGORY
+  category          String?  // SUBSCRIPTION, CREDITS, ADDONS, TOTAL
+  limitPaise        Int      @map("limit_paise")
+  currentSpendPaise Int      @default(0) @map("current_spend_paise")
+  
+  // Alert Thresholds
+  alertAt50Percent  Boolean  @default(true) @map("alert_at_50_percent")
+  alertAt80Percent  Boolean  @default(true) @map("alert_at_80_percent")
+  alertAt100Percent Boolean  @default(true) @map("alert_at_100_percent")
+  
+  // Alert Status
+  alertsSent        Json?    @map("alerts_sent") // Array of alert timestamps
+  
+  periodStart       DateTime @map("period_start")
+  periodEnd         DateTime @map("period_end")
+  
+  isActive          Boolean  @default(true) @map("is_active")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([budgetType])
+  @@index([category])
+  @@index([isActive])
+  @@map("budgets")
+}
+
+model BillingPaymentMethod {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  methodType        String   @map("method_type") // UPI, NEFT, RTGS, IMPS, CARD, WALLET
+  provider         String?  // Razorpay, Stripe, etc.
+  accountDetails   Json?    @map("account_details") // Encrypted account details
+  
+  // Preferences
+  isDefault         Boolean  @default(false) @map("is_default")
+  isAutoPayment     Boolean  @default(false) @map("is_auto_payment")
+  autoPaymentRules  Json?    @map("auto_payment_rules")
+  
+  // Status
+  isActive          Boolean  @default(true) @map("is_active")
+  verifiedAt        DateTime? @map("verified_at")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([methodType])
+  @@index([isDefault])
+  @@map("payment_methods")
+}
+
+// ============================================
+// INVOICE MANAGEMENT ADVANCED
+// ============================================
+
+model InvoiceTemplate {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  name              String   // Template name
+  description       String?  // Template description
+  
+  // Template structure (JSON)
+  templateData      Json     @map("template_data") // Invoice structure, line items, etc.
+  
+  // Default values
+  defaultCustomerId String? @map("default_customer_id")
+  defaultTerms      String?  @map("default_terms")
+  defaultNotes      String?  @map("default_notes")
+  
+  isDefault         Boolean  @default(false) @map("is_default")
+  isActive          Boolean  @default(true) @map("is_active")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([isDefault])
+  @@map("invoice_templates")
+}
+
+model RecurringInvoice {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  name              String   // Recurring invoice name
+  description       String?  // Description
+  
+  // Schedule
+  frequency         String   @map("frequency") // DAILY, WEEKLY, MONTHLY, QUARTERLY, YEARLY
+  interval          Int      @default(1) // Every N periods
+  startDate         DateTime @map("start_date")
+  endDate           DateTime? @map("end_date")
+  nextRunDate       DateTime @map("next_run_date")
+  
+  // Template
+  templateId        String?  @map("template_id")
+  invoiceData       Json     @map("invoice_data") // Invoice structure
+  
+  // Customer
+  customerId        String?  @map("customer_id")
+  
+  // Status
+  status            String   @default("ACTIVE") // ACTIVE, PAUSED, COMPLETED, CANCELLED
+  invoicesGenerated Int      @default(0) @map("invoices_generated")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([status])
+  @@index([nextRunDate])
+  @@map("recurring_invoices")
+}
+
+model InvoiceDispute {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  invoiceId         Int      @map("invoice_id")
+  
+  disputeType       String   @map("dispute_type") // AMOUNT, ITEM, TAX, OTHER
+  reason            String   // Dispute reason
+  description       String?  // Detailed description
+  
+  // Resolution
+  status            String   @default("OPEN") // OPEN, IN_PROGRESS, RESOLVED, CLOSED
+  resolution        String?  // Resolution details
+  resolvedBy        String?  @map("resolved_by")
+  resolvedAt        DateTime? @map("resolved_at")
+  
+  // Amount adjustment
+  requestedAdjustmentPaise Int? @map("requested_adjustment_paise")
+  approvedAdjustmentPaise  Int? @map("approved_adjustment_paise")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([invoiceId])
+  @@index([status])
+  @@map("invoice_disputes")
+}
+
+// ============================================
+// MULTI-CURRENCY SUPPORT
+// ============================================
+
+model Currency {
+  id                String   @id @default(cuid())
+  code              String   @unique // USD, INR, EUR, etc.
+  name              String   // US Dollar, Indian Rupee, etc.
+  symbol            String   // $, ₹, €, etc.
+  decimalPlaces     Int      @default(2) @map("decimal_places")
+  isActive          Boolean  @default(true) @map("is_active")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@map("currencies")
+}
+
+model ExchangeRate {
+  id                String   @id @default(cuid())
+  fromCurrency      String   @map("from_currency")
+  toCurrency        String   @map("to_currency")
+  rate              Decimal  @db.Decimal(12, 6) // Exchange rate
+  effectiveDate     DateTime @default(now()) @map("effective_date")
+  source            String?  // Manual, API, etc.
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([fromCurrency, toCurrency])
+  @@index([effectiveDate])
+  @@map("exchange_rates")
+}
+
+model TenantCurrency {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  currencyCode      String   @map("currency_code")
+  isDefault         Boolean  @default(false) @map("is_default")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@unique([tenantId, currencyCode])
+  @@index([tenantId])
+  @@map("tenant_currencies")
+}
+
+// ============================================
+// ZERO TRUST ARCHITECTURE
+// ============================================
+
+model ZeroTrustPolicy {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  name              String   // Policy name
+  description       String?  // Policy description
+  
+  // Policy rules
+  resourcePattern   String   @map("resource_pattern") // e.g., "/api/*", "/admin/*"
+  allowedRoles      Json?    @map("allowed_roles") // Array of role names
+  requiredMfa       Boolean  @default(false) @map("required_mfa")
+  ipWhitelist       Json?    @map("ip_whitelist") // Array of IPs/CIDR
+  deviceTrustLevel  String?  @map("device_trust_level") // TRUSTED, SUSPICIOUS, UNTRUSTED
+  timeRestrictions  Json?    @map("time_restrictions") // { start: "09:00", end: "17:00", timezone: "Asia/Kolkata" }
+  
+  // Enforcement
+  action            String   @default("ALLOW") // ALLOW, DENY, CHALLENGE
+  priority          Int      @default(0) // Higher priority = evaluated first
+  
+  isActive          Boolean  @default(true) @map("is_active")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([isActive])
+  @@index([priority])
+  @@map("zero_trust_policies")
+}
+
+model ZeroTrustAccessLog {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  userId            String?  @map("user_id")
+  
+  resource          String   // Requested resource
+  method            String   // HTTP method
+  ipAddress         String?  @map("ip_address")
+  userAgent         String?  @map("user_agent")
+  deviceId          String?  @map("device_id")
+  
+  // Policy evaluation
+  policyId          String?  @map("policy_id")
+  policyName        String?  @map("policy_name")
+  decision          String   // ALLOWED, DENIED, CHALLENGED
+  reason            String?  // Why this decision was made
+  
+  // Context
+  mfaVerified       Boolean  @default(false) @map("mfa_verified")
+  deviceTrustScore  Decimal? @db.Decimal(5, 2) @map("device_trust_score")
+  geoLocation       Json?    @map("geo_location")
+  
+  createdAt         DateTime @default(now())
+  
+  @@index([tenantId])
+  @@index([userId])
+  @@index([decision])
+  @@index([createdAt])
+  @@map("zero_trust_access_logs")
+}
+
+// ============================================
+// ADVANCED MFA OPTIONS
+// ============================================
+
+model MfaMethod {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  userId            String   @map("user_id")
+  
+  methodType        String   @map("method_type") // TOTP, SMS, EMAIL, BIOMETRIC, HARDWARE_KEY
+  name              String   // Method name/label
+  
+  // TOTP
+  secret            String?  // Encrypted secret
+  backupCodes       Json?    @map("backup_codes") // Array of backup codes
+  
+  // Hardware Key (WebAuthn)
+  credentialId      String?  @unique @map("credential_id")
+  publicKey         String?  @map("public_key")
+  counter           Int      @default(0)
+  
+  // Biometric
+  biometricType     String?  @map("biometric_type") // FINGERPRINT, FACE, VOICE
+  
+  // Status
+  isEnabled         Boolean  @default(true) @map("is_enabled")
+  isDefault         Boolean  @default(false) @map("is_default")
+  lastUsedAt        DateTime? @map("last_used_at")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([userId])
+  @@index([methodType])
+  @@map("mfa_methods")
+}
+
+// ============================================
+// IP WHITELISTING & GEO-BLOCKING
+// ============================================
+
+model IpWhitelist {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  ipAddress         String   @map("ip_address") // Can be CIDR notation
+  description       String?  // Description/note
+  isActive          Boolean  @default(true) @map("is_active")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([ipAddress])
+  @@map("ip_whitelists")
+}
+
+model IpBlacklist {
+  id                String   @id @default(cuid())
+  tenantId          String?  @map("tenant_id") // null = global blacklist
+  
+  ipAddress         String   @map("ip_address") // Can be CIDR notation
+  reason            String?  // Why it's blacklisted
+  isActive          Boolean  @default(true) @map("is_active")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([ipAddress])
+  @@map("ip_blacklists")
+}
+
+model GeoBlockingRule {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  countryCode       String   @map("country_code") // ISO 3166-1 alpha-2
+  countryName       String   @map("country_name")
+  action            String   @default("BLOCK") // BLOCK, ALLOW, CHALLENGE
+  reason            String?  // Why this country is blocked
+  
+  isActive          Boolean  @default(true) @map("is_active")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([countryCode])
+  @@map("geo_blocking_rules")
+}
+
+// ============================================
+// MULTI-LICENSE MANAGEMENT
+// ============================================
+
+model LicensePool {
+  id                String   @id @default(cuid())
+  tenantId          String   @map("tenant_id")
+  
+  name              String   // Pool name
+  description       String?  // Pool description
+  
+  // License allocation
+  totalLicenses     Int      @map("total_licenses")
+  allocatedLicenses Int      @default(0) @map("allocated_licenses")
+  availableLicenses Int      @map("available_licenses") // Computed: total - allocated
+  
+  // Settings
+  autoAllocate      Boolean  @default(false) @map("auto_allocate")
+  allowTransfer     Boolean  @default(true) @map("allow_transfer")
+  
+  isActive          Boolean  @default(true) @map("is_active")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([isActive])
+  @@map("license_pools")
+}
+
+model LicenseAllocation {
+  id                String   @id @default(cuid())
+  poolId            String   @map("pool_id")
+  licenseId         String   @map("license_id")
+  
+  allocatedTo       String?  @map("allocated_to") // User/tenant ID
+  allocatedAt       DateTime @default(now()) @map("allocated_at")
+  expiresAt         DateTime? @map("expires_at")
+  
+  status            String   @default("ACTIVE") // ACTIVE, REVOKED, EXPIRED
+  revokedAt         DateTime? @map("revoked_at")
+  revocationReason  String? @map("revocation_reason")
+  
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  
+  @@index([poolId])
+  @@index([licenseId])
+  @@index([status])
+  @@map("license_allocations")
+}
+
+// ============================================
+// SECURITY EVENTS & MONITORING
+// ============================================
+
+enum SecurityEventSeverity {
+  info
+  warning
+  error
+  critical
+}
+
+// Security Events (immutable)
+model SecurityEvent {
+  id            String              @id @default(cuid())
+  tenantId      String?             @map("tenant_id")
+  userId        String?             @map("user_id")
+  eventType     String              @map("event_type") // LOGIN_FAILED, LOGIN_SUCCESS, LICENSE_COLLISION, EXCESSIVE_REFRESH, ACCOUNT_LOCKED, TOKEN_REVOKED
+  severity      SecurityEventSeverity @default(info)
+  ipAddress     String?             @map("ip_address") @db.Inet
+  userAgent     String?             @map("user_agent")
+  deviceId      String?             @map("device_id")
+  metadata      Json?
+  correlationId String?             @map("correlation_id")
+  createdAt     DateTime            @default(now()) @map("created_at")
+
+  tenant Tenant? @relation(fields: [tenantId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId])
+  @@index([userId])
+  @@index([eventType])
+  @@index([severity])
+  @@index([createdAt])
+  @@index([correlationId])
+  @@map("security_events")
+}
+
+// Global Kill Switch
+model GlobalKillSwitch {
+  id          String    @id @default(cuid())
+  featureName String    @unique @map("feature_name") // 'app', 'api', 'license', 'auth'
+  isEnabled   Boolean   @default(true) @map("is_enabled")
+  message     String?
+  enabledBy   String?   @map("enabled_by")
+  enabledAt   DateTime? @map("enabled_at")
+  disabledAt  DateTime? @map("disabled_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([featureName])
+  @@index([isEnabled])
+  @@map("global_kill_switch")
+}
+
+// Rate Limit Tracking
+model RateLimitTracking {
+  id          String   @id @default(cuid())
+  identifier  String   // IP, user_id, tenant_id, etc.
+  endpoint    String
+  count       Int      @default(1)
+  windowStart DateTime @default(now()) @map("window_start")
+  expiresAt   DateTime @map("expires_at")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@unique([identifier, endpoint, windowStart])
+  @@index([identifier])
+  @@index([endpoint])
+  @@index([expiresAt])
+  @@map("rate_limit_tracking")
+}
+
+// Feature Flags
+model FeatureFlag {
+  id          String    @id @default(cuid())
+  featureName String    @unique @map("feature_name")
+  isEnabled   Boolean   @default(false) @map("is_enabled")
+  description String?
+  enabledBy   String?   @map("enabled_by")
+  enabledAt   DateTime? @map("enabled_at")
+  disabledAt  DateTime? @map("disabled_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([featureName])
+  @@index([isEnabled])
+  @@map("feature_flags")
+}
+
+// ============================================
+// UPDATE EXISTING MODELS
+// ============================================
+
+// Update License model to include new fields
+// Note: These fields are added in the SQL migration
+// We'll add them here for Prisma type safety

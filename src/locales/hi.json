@@ -1,0 +1,61 @@
+{
+  "common": {
+    "appName": "फार्मापल्स AI",
+    "welcome": "स्वागत है",
+    "save": "सहेजें",
+    "cancel": "रद्द करें",
+    "delete": "हटाएं",
+    "edit": "संपादित करें",
+    "search": "खोजें",
+    "filter": "फ़िल्टर",
+    "loading": "लोड हो रहा है...",
+    "error": "त्रुटि",
+    "success": "सफल"
+  },
+  "pos": {
+    "title": "POS टर्मिनल",
+    "addProduct": "उत्पाद जोड़ें",
+    "cart": "कार्ट",
+    "checkout": "चेकआउट",
+    "total": "कुल",
+    "payment": "भुगतान",
+    "cash": "नकद",
+    "card": "कार्ड",
+    "upi": "UPI",
+    "wallet": "वॉलेट"
+  },
+  "invoice": {
+    "title": "चालान",
+    "invoiceNumber": "चालान संख्या",
+    "date": "तारीख",
+    "customer": "ग्राहक",
+    "items": "आइटम",
+    "subtotal": "उप-योग",
+    "gst": "GST",
+    "total": "कुल",
+    "thankYou": "आपकी खरीदारी के लिए धन्यवाद!"
+  },
+  "prescription": {
+    "title": "प्रिस्क्रिप्शन",
+    "doctorName": "डॉक्टर का नाम",
+    "date": "तारीख",
+    "medicines": "दवाएं",
+    "upload": "प्रिस्क्रिप्शन अपलोड करें",
+    "scan": "प्रिस्क्रिप्शन स्कैन करें"
+  },
+  "customer": {
+    "title": "ग्राहक",
+    "name": "नाम",
+    "phone": "फोन",
+    "email": "ईमेल",
+    "address": "पता"
+  },
+  "inventory": {
+    "title": "इन्वेंटरी",
+    "product": "उत्पाद",
+    "quantity": "मात्रा",
+    "price": "मूल्य",
+    "lowStock": "कम स्टॉक",
+    "expiring": "जल्द ही समाप्त हो रहा है"
+  }
+}

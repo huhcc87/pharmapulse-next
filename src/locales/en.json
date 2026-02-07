@@ -1,0 +1,61 @@
+{
+  "common": {
+    "appName": "PharmaPulse AI",
+    "welcome": "Welcome",
+    "save": "Save",
+    "cancel": "Cancel",
+    "delete": "Delete",
+    "edit": "Edit",
+    "search": "Search",
+    "filter": "Filter",
+    "loading": "Loading...",
+    "error": "Error",
+    "success": "Success"
+  },
+  "pos": {
+    "title": "POS Terminal",
+    "addProduct": "Add Product",
+    "cart": "Cart",
+    "checkout": "Checkout",
+    "total": "Total",
+    "payment": "Payment",
+    "cash": "Cash",
+    "card": "Card",
+    "upi": "UPI",
+    "wallet": "Wallet"
+  },
+  "invoice": {
+    "title": "Invoice",
+    "invoiceNumber": "Invoice Number",
+    "date": "Date",
+    "customer": "Customer",
+    "items": "Items",
+    "subtotal": "Subtotal",
+    "gst": "GST",
+    "total": "Total",
+    "thankYou": "Thank you for your purchase!"
+  },
+  "prescription": {
+    "title": "Prescription",
+    "doctorName": "Doctor Name",
+    "date": "Date",
+    "medicines": "Medicines",
+    "upload": "Upload Prescription",
+    "scan": "Scan Prescription"
+  },
+  "customer": {
+    "title": "Customer",
+    "name": "Name",
+    "phone": "Phone",
+    "email": "Email",
+    "address": "Address"
+  },
+  "inventory": {
+    "title": "Inventory",
+    "product": "Product",
+    "quantity": "Quantity",
+    "price": "Price",
+    "lowStock": "Low Stock",
+    "expiring": "Expiring Soon"
+  }
+}

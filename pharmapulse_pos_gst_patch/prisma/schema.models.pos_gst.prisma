@@ -1,0 +1,155 @@
+// ---- POS + GST (India) models (copy into your prisma/schema.prisma) ----
+
+enum TaxInclusion {
+  EXCLUSIVE  // tax added on top
+  INCLUSIVE  // price includes tax
+}
+
+enum PaymentMethod {
+  CASH
+  CARD
+  UPI
+  WALLET
+  BANK_TRANSFER
+  CREDIT
+}
+
+enum InvoiceStatus {
+  DRAFT
+  PAID
+  VOID
+  REFUNDED
+}
+
+model Product {
+  id            String   @id @default(cuid())
+  name          String
+  brand         String?
+  strength      String?
+  form          String?  // tablet/syrup/injection etc.
+  packSize      String?  // e.g., "10 tabs"
+  barcode       String?  @unique // UPC/EAN; nullable for items without barcode
+  internalCode  String?  @unique // your NMED-000001 etc.
+  hsn           String?  // HSN code in India
+  gstRate       Decimal? @db.Decimal(5,2) // e.g., 5.00, 12.00
+  taxInclusion  TaxInclusion @default(EXCLUSIVE)
+
+  mrp           Decimal? @db.Decimal(12,2)
+  salePrice     Decimal  @db.Decimal(12,2)
+  purchaseCost  Decimal? @db.Decimal(12,2)
+
+  isRx          Boolean  @default(false)
+  isActive      Boolean  @default(true)
+
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  invoiceLines  InvoiceLine[]
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String?  @index
+  gstin     String?  // for B2B buyers
+  stateCode String?  // GST state code (e.g., "27" Maharashtra)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  invoices  Invoice[]
+}
+
+model Invoice {
+  id              String        @id @default(cuid())
+  invoiceNo        String        @unique // generate sequential per store
+  status           InvoiceStatus @default(DRAFT)
+
+  customerId       String?
+  customer         Customer?     @relation(fields: [customerId], references: [id])
+
+  storeId          String?       // if multi-store
+  cashierUserId    String?
+
+  currency         String        @default("INR")
+
+  subtotal         Decimal       @db.Decimal(12,2)
+  discountTotal    Decimal       @db.Decimal(12,2) @default(0)
+  taxTotal         Decimal       @db.Decimal(12,2) @default(0)
+  roundOff         Decimal       @db.Decimal(12,2) @default(0)
+  grandTotal       Decimal       @db.Decimal(12,2)
+
+  // GST context
+  sellerGstin      String?
+  sellerStateCode  String?       // "29" etc.
+  buyerGstin       String?
+  buyerStateCode   String?
+  isInterState     Boolean       @default(false) // determines IGST vs CGST/SGST
+
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+
+  lines            InvoiceLine[]
+  taxLines         TaxLine[]
+  payments         Payment[]
+}
+
+model InvoiceLine {
+  id          String   @id @default(cuid())
+  invoiceId   String
+  invoice     Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  productId   String?
+  product     Product? @relation(fields: [productId], references: [id])
+
+  name        String
+  hsn         String?
+  qty         Int
+  unitPrice   Decimal  @db.Decimal(12,2) // price per unit (may be inclusive or exclusive)
+  discount    Decimal  @db.Decimal(12,2) @default(0)
+
+  gstRate     Decimal? @db.Decimal(5,2)
+  lineSubtotal Decimal @db.Decimal(12,2) // qty*unitPrice - discount (before tax if EXCLUSIVE)
+  lineTax      Decimal @db.Decimal(12,2) @default(0)
+  lineTotal    Decimal @db.Decimal(12,2) // subtotal + tax
+
+  createdAt   DateTime @default(now())
+}
+
+model TaxLine {
+  id        String   @id @default(cuid())
+  invoiceId String
+  invoice   Invoice  @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  hsn       String?
+  gstRate   Decimal  @db.Decimal(5,2)
+
+  taxableValue Decimal @db.Decimal(12,2)
+
+  // split by intra/inter state
+  cgst      Decimal @db.Decimal(12,2) @default(0)
+  sgst      Decimal @db.Decimal(12,2) @default(0)
+  igst      Decimal @db.Decimal(12,2) @default(0)
+
+  createdAt DateTime @default(now())
+}
+
+model Payment {
+  id        String        @id @default(cuid())
+  invoiceId String
+  invoice   Invoice       @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  method    PaymentMethod
+  amount    Decimal       @db.Decimal(12,2)
+  refNo     String?       // UPI ref / card auth code / bank txn id
+  createdAt DateTime      @default(now())
+}
+
+model PrintJob {
+  id        String   @id @default(cuid())
+  kind      String   // "receipt" | "invoice" | "label"
+  payload   Json     // structured print payload
+  status    String   @default("QUEUED") // QUEUED|PRINTED|FAILED
+  error     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}

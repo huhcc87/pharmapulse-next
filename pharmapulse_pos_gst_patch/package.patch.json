@@ -1,0 +1,13 @@
+{
+  "dependencies_add": {
+    "zustand": "^4.5.2",
+    "clsx": "^2.1.1",
+    "tailwind-merge": "^2.5.4",
+    "xlsx": "^0.18.5",
+    "p-limit": "^4.0.0"
+  },
+  "devDependencies_add": {
+    "ts-node": "^10.9.2"
+  },
+  "notes": "Merge into your existing package.json; do not replace."
+}
