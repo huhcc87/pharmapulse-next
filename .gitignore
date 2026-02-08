@@ -36,3 +36,8 @@ next-env.d.ts
 # Excel temp and data files
 ~.xlsx
 *.xlsx
+# Ignore large local data files
+data/*.csv
+data/*.xlsx
+data/*.xls
+
