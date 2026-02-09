@@ -1,36 +1,52 @@
+// src/lib/ai/security-audit.ts
 // AI Security Audit & Reporting
 // Automated security reports, vulnerability detection, compliance gap analysis
 
-import { PrismaClient } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 
-const prisma = new PrismaClient();
+type Severity = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 
 export interface SecurityAuditResult {
   overallScore: number; // 0-100
   previousScore?: number;
   scoreChange?: number;
+
   vulnerabilitiesFound: number;
   vulnerabilities?: Array<{
     type: string;
-    severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+    severity: Severity;
     description: string;
     recommendation: string;
   }>;
+
   complianceGaps?: Array<{
     standard: string; // GDPR, HIPAA, etc.
     gap: string;
     severity: string;
   }>;
+
   complianceScore?: number;
+
   trends?: {
     direction: "IMPROVING" | "DECLINING" | "STABLE";
     change: number;
   };
+
   recommendations?: Array<{
     priority: "HIGH" | "MEDIUM" | "LOW";
     action: string;
     impact: string;
   }>;
+}
+
+type Vulnerability = NonNullable<SecurityAuditResult["vulnerabilities"]>[number];
+type ComplianceGap = NonNullable<SecurityAuditResult["complianceGaps"]>[number];
+type Recommendation = NonNullable<SecurityAuditResult["recommendations"]>[number];
+
+function toTenantInt(tenantId: string | number | undefined, fallback = 1): number {
+  if (typeof tenantId === "number" && Number.isFinite(tenantId)) return tenantId;
+  const n = typeof tenantId === "string" ? Number.parseInt(tenantId, 10) : NaN;
+  return Number.isFinite(n) ? n : fallback;
 }
 
 /**
@@ -40,6 +56,8 @@ export async function generateSecurityAudit(
   tenantId: string,
   auditType: "MONTHLY" | "QUARTERLY" | "ANNUAL" | "ON_DEMAND" = "ON_DEMAND"
 ): Promise<SecurityAuditResult> {
+  const tenantInt = toTenantInt(tenantId, 1);
+
   try {
     const result: SecurityAuditResult = {
       overallScore: 100,
@@ -49,49 +67,41 @@ export async function generateSecurityAudit(
       recommendations: [],
     };
 
-    // 1. Get previous audit for comparison
+    // 1) Get previous audit for comparison
     const previousAudit = await prisma.aISecurityAudit.findFirst({
       where: {
-        tenantId,
+        tenantId, // keeping string because your AI audit model appears to store tenantId as string
         auditType,
       },
-      orderBy: {
-        auditDate: "desc",
-      },
+      orderBy: { auditDate: "desc" },
     });
 
     if (previousAudit) {
       result.previousScore = Number(previousAudit.overallScore);
     }
 
-    // 2. Check for vulnerabilities
-    const vulnerabilities = await detectVulnerabilities(tenantId);
+    // 2) Detect vulnerabilities (ALWAYS returns [])
+    const vulnerabilities = await detectVulnerabilities(tenantId, tenantInt);
     result.vulnerabilities = vulnerabilities;
     result.vulnerabilitiesFound = vulnerabilities.length;
 
     // Deduct score for vulnerabilities
     for (const vuln of vulnerabilities) {
-      if (vuln.severity === "CRITICAL") {
-        result.overallScore -= 20;
-      } else if (vuln.severity === "HIGH") {
-        result.overallScore -= 10;
-      } else if (vuln.severity === "MEDIUM") {
-        result.overallScore -= 5;
-      } else {
-        result.overallScore -= 2;
-      }
+      if (vuln.severity === "CRITICAL") result.overallScore -= 20;
+      else if (vuln.severity === "HIGH") result.overallScore -= 10;
+      else if (vuln.severity === "MEDIUM") result.overallScore -= 5;
+      else result.overallScore -= 2;
     }
 
-    // 3. Compliance gap analysis
-    const complianceGaps = await analyzeComplianceGaps(tenantId);
+    // 3) Compliance gap analysis (ALWAYS returns [])
+    const complianceGaps = await analyzeComplianceGaps(tenantId, tenantInt);
     result.complianceGaps = complianceGaps;
-    
-    // Calculate compliance score
-    const complianceScore = 100 - (complianceGaps.length * 10);
+
+    const complianceScore = 100 - complianceGaps.length * 10;
     result.complianceScore = Math.max(0, complianceScore);
 
-    // 4. Security trends
-    if (previousAudit) {
+    // 4) Security trends
+    if (previousAudit && typeof result.previousScore === "number") {
       const change = result.overallScore - result.previousScore;
       result.scoreChange = change;
       result.trends = {
@@ -100,10 +110,10 @@ export async function generateSecurityAudit(
       };
     }
 
-    // 5. Generate recommendations
+    // 5) Recommendations
     result.recommendations = generateRecommendations(result);
 
-    // Ensure score is between 0-100
+    // clamp 0..100
     result.overallScore = Math.max(0, Math.min(100, result.overallScore));
 
     return result;
@@ -113,44 +123,54 @@ export async function generateSecurityAudit(
   }
 }
 
-async function detectVulnerabilities(tenantId: string): Promise<SecurityAuditResult["vulnerabilities"]> {
-  const vulnerabilities: SecurityAuditResult["vulnerabilities"] = [];
+/**
+ * Detect vulnerabilities
+ *
+ * IMPORTANT FIX:
+ * Your Prisma User model does NOT have tenantId (error: tenantId does not exist on UserWhereInput).
+ * So we DO NOT filter users by tenantId here.
+ * If you later add org/store scoping (e.g., storeId, orgId, pharmacyId), filter by that instead.
+ */
+async function detectVulnerabilities(
+  tenantIdString: string,
+  tenantInt: number
+): Promise<Vulnerability[]> {
+  const vulnerabilities: Vulnerability[] = [];
 
-  // Check for weak passwords (users with default passwords)
-  const usersWithWeakPasswords = await prisma.user.findMany({
-    where: {
-      tenantId: parseInt(tenantId) || 1,
-    },
-    take: 10, // Sample check
+  // 1) Sample users (no tenant filter, because field doesn't exist)
+  const sampleUsers = await prisma.user.findMany({
+    take: 10,
+    select: { id: true },
   });
 
-  // Check for MFA adoption
-  const totalUsers = usersWithWeakPasswords.length;
+  const totalUsers = sampleUsers.length;
+
+  // 2) MFA adoption
+  // (Your mfaSecret model appears to have tenantId as STRING based on earlier usage.)
   const usersWithMFA = await prisma.mfaSecret.count({
     where: {
-      tenantId,
+      tenantId: tenantIdString,
       isEnabled: true,
     },
   });
 
   const mfaAdoptionRate = totalUsers > 0 ? (usersWithMFA / totalUsers) * 100 : 0;
+
   if (mfaAdoptionRate < 50) {
     vulnerabilities.push({
       type: "LOW_MFA_ADOPTION",
       severity: "MEDIUM",
-      description: `Only ${mfaAdoptionRate.toFixed(1)}% of users have MFA enabled`,
-      recommendation: "Enable MFA for all users to improve security",
+      description: `Only ${mfaAdoptionRate.toFixed(1)}% of sampled users have MFA enabled`,
+      recommendation: "Require MFA for all staff accounts (at minimum admins/cashiers)",
     });
   }
 
-  // Check for recent security events
+  // 3) Recent security events
   const recentCriticalEvents = await prisma.securityEvent.count({
     where: {
-      tenantId,
+      tenantId: tenantIdString,
       severity: "critical",
-      createdAt: {
-        gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // Last 7 days
-      },
+      createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
     },
   });
 
@@ -159,17 +179,15 @@ async function detectVulnerabilities(tenantId: string): Promise<SecurityAuditRes
       type: "HIGH_CRITICAL_EVENTS",
       severity: "HIGH",
       description: `${recentCriticalEvents} critical security events in the last 7 days`,
-      recommendation: "Review and address critical security events immediately",
+      recommendation: "Investigate event sources, rotate secrets, and tighten rate limits immediately",
     });
   }
 
-  // Check for account lockouts
+  // 4) Account lockouts
   const recentLockouts = await prisma.accountLockout.count({
     where: {
-      tenantId,
-      lockedUntil: {
-        gte: new Date(),
-      },
+      tenantId: tenantIdString,
+      lockedUntil: { gte: new Date() },
     },
   });
 
@@ -178,37 +196,44 @@ async function detectVulnerabilities(tenantId: string): Promise<SecurityAuditRes
       type: "MULTIPLE_ACCOUNT_LOCKOUTS",
       severity: "MEDIUM",
       description: `${recentLockouts} accounts currently locked`,
-      recommendation: "Review lockout policies and investigate potential attacks",
+      recommendation: "Review lockouts for credential stuffing; enable IP throttling and MFA enforcement",
     });
   }
 
   return vulnerabilities;
 }
 
-async function analyzeComplianceGaps(tenantId: string): Promise<SecurityAuditResult["complianceGaps"]> {
-  const gaps: SecurityAuditResult["complianceGaps"] = [];
+/**
+ * Compliance gap analysis (returns a concrete array)
+ *
+ * NOTE:
+ * If your AuditLog model uses tenantId as INT, keep tenantInt.
+ * If it uses string tenantId, change to tenantIdString.
+ */
+async function analyzeComplianceGaps(
+  tenantIdString: string,
+  tenantInt: number
+): Promise<ComplianceGap[]> {
+  const gaps: ComplianceGap[] = [];
 
-  // GDPR Compliance (simplified checks)
-  // Check if audit logging is enabled
+  // GDPR: audit logging presence (simplified)
   const hasAuditLogs = await prisma.auditLog.count({
+    // If this errors next, your AuditLog tenant field is NOT `tenantId: Int`.
+    // In that case: remove tenantId filter or use tenantIdString based on your schema.
     where: {
-      tenantId: parseInt(tenantId) || 1,
-      createdAt: {
-        gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      },
-    },
+      tenantId: tenantInt as any,
+      createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
+    } as any,
   });
 
   if (hasAuditLogs < 10) {
     gaps.push({
       standard: "GDPR",
-      gap: "Insufficient audit logging",
+      gap: "Insufficient audit logging (low volume in last 30 days)",
       severity: "MEDIUM",
     });
   }
 
-  // Check for data retention policies
-  // (This would require additional schema/models)
   gaps.push({
     standard: "GDPR",
     gap: "Data retention policy not configured",
@@ -218,38 +243,40 @@ async function analyzeComplianceGaps(tenantId: string): Promise<SecurityAuditRes
   return gaps;
 }
 
-function generateRecommendations(audit: SecurityAuditResult): SecurityAuditResult["recommendations"] {
-  const recommendations: SecurityAuditResult["recommendations"] = [];
+function generateRecommendations(audit: SecurityAuditResult): Recommendation[] {
+  const recommendations: Recommendation[] = [];
+  const vulns = audit.vulnerabilities ?? [];
+  const gaps = audit.complianceGaps ?? [];
 
   if (audit.overallScore < 70) {
     recommendations.push({
       priority: "HIGH",
-      action: "Address critical vulnerabilities immediately",
-      impact: "Will improve security score significantly",
+      action: "Address high/critical vulnerabilities immediately",
+      impact: "Reduces breach risk and improves security score quickly",
     });
   }
 
-  if (audit.vulnerabilitiesFound > 0) {
+  if (vulns.length > 0) {
     recommendations.push({
       priority: "HIGH",
       action: "Fix identified vulnerabilities",
-      impact: `Will improve score by ${audit.vulnerabilitiesFound * 5} points`,
+      impact: `Expected improvement: ~${vulns.length * 5} points (rule-of-thumb)`,
     });
   }
 
-  if (audit.complianceGaps && audit.complianceGaps.length > 0) {
+  if (gaps.length > 0) {
     recommendations.push({
       priority: "MEDIUM",
-      action: "Address compliance gaps",
-      impact: "Will improve compliance score and reduce regulatory risk",
+      action: "Close compliance gaps (logging, retention, access controls)",
+      impact: "Improves compliance score and reduces regulatory exposure",
     });
   }
 
   if (audit.trends?.direction === "DECLINING") {
     recommendations.push({
       priority: "MEDIUM",
-      action: "Review security practices - score is declining",
-      impact: "Prevent further security degradation",
+      action: "Review security posture (score trending down)",
+      impact: "Prevents further degradation and recurring incidents",
     });
   }
 

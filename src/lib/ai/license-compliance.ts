@@ -24,15 +24,24 @@ export interface LicenseComplianceResult {
   reasoning?: string;
 }
 
+function toStr(value: string | number, label: string): string {
+  const s = String(value ?? "").trim();
+  if (!s) throw new Error(`Invalid ${label}`);
+  return s;
+}
+
 /**
  * Analyze license compliance
  * Predicts usage, detects violations, scores compliance risk
  */
 export async function analyzeLicenseCompliance(
-  tenantId: string,
+  tenantId: string | number,
   licenseId: string
 ): Promise<LicenseComplianceResult> {
   try {
+    // ✅ tenantId is STRING for LicenseAuditLog (based on TS error)
+    const tenantIdStr = toStr(tenantId, "tenantId");
+
     // Get license
     const license = await prisma.license.findUnique({
       where: { id: licenseId },
@@ -42,24 +51,18 @@ export async function analyzeLicenseCompliance(
         },
         auditLogs: {
           where: {
-            action: {
-              in: ["LOGIN_BLOCKED_DEVICE", "LOGIN_BLOCKED_IP"],
-            },
+            action: { in: ["LOGIN_BLOCKED_DEVICE", "LOGIN_BLOCKED_IP"] },
             createdAt: {
-              gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
+              gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
             },
           },
-          orderBy: {
-            createdAt: "desc",
-          },
+          orderBy: { createdAt: "desc" },
           take: 50,
         },
       },
     });
 
-    if (!license) {
-      throw new Error("License not found");
-    }
+    if (!license) throw new Error("License not found");
 
     const result: LicenseComplianceResult = {
       currentUsage: license.deviceRegistrations.length,
@@ -70,48 +73,40 @@ export async function analyzeLicenseCompliance(
       ipViolations: 0,
     };
 
-    // Calculate device violations
-    const deviceViolations = license.auditLogs.filter(
+    // Device/IP violations from included auditLogs (already filtered)
+    result.deviceViolations = license.auditLogs.filter(
       (log) => log.action === "LOGIN_BLOCKED_DEVICE"
     ).length;
-    result.deviceViolations = deviceViolations;
 
-    // Calculate IP violations
-    const ipViolations = license.auditLogs.filter(
+    result.ipViolations = license.auditLogs.filter(
       (log) => log.action === "LOGIN_BLOCKED_IP"
     ).length;
-    result.ipViolations = ipViolations;
 
-    // Calculate compliance score (starts at 100, deducts for violations)
+    // Compliance score deductions
     result.complianceScore = 100;
-    result.complianceScore -= deviceViolations * 10; // -10 per device violation
-    result.complianceScore -= ipViolations * 15; // -15 per IP violation
+    result.complianceScore -= result.deviceViolations * 10;
+    result.complianceScore -= result.ipViolations * 15;
 
-    // Usage prediction (simple linear projection)
-    const usageHistory = await getUsageHistory(tenantId, licenseId);
+    // Usage prediction
+    const usageHistory = await getUsageHistory(tenantIdStr, licenseId);
     if (usageHistory.length > 0) {
-      const avgDailyUsage = usageHistory.reduce((sum, u) => sum + u.usage, 0) / usageHistory.length;
-      const predictedUsage = Math.ceil(avgDailyUsage * 30); // Next 30 days
+      const avgDailyUsage =
+        usageHistory.reduce((sum, u) => sum + u.usage, 0) / usageHistory.length;
+
+      const predictedUsage = Math.ceil(avgDailyUsage * 30);
       result.predictedUsage = predictedUsage;
 
-      if (predictedUsage > result.usageLimit) {
-        const excess = predictedUsage - result.usageLimit;
-        const daysToExceed = Math.ceil(result.usageLimit / avgDailyUsage);
-        result.daysToExceedLimit = daysToExceed;
-        result.complianceScore -= 20; // Penalty for predicted overage
+      if (avgDailyUsage > 0 && predictedUsage > result.usageLimit) {
+        result.daysToExceedLimit = Math.ceil(result.usageLimit / avgDailyUsage);
+        result.complianceScore -= 20;
       }
     }
 
-    // Determine risk level
-    if (result.complianceScore >= 90) {
-      result.riskLevel = "LOW";
-    } else if (result.complianceScore >= 70) {
-      result.riskLevel = "MEDIUM";
-    } else if (result.complianceScore >= 50) {
-      result.riskLevel = "HIGH";
-    } else {
-      result.riskLevel = "CRITICAL";
-    }
+    // Risk level
+    if (result.complianceScore >= 90) result.riskLevel = "LOW";
+    else if (result.complianceScore >= 70) result.riskLevel = "MEDIUM";
+    else if (result.complianceScore >= 50) result.riskLevel = "HIGH";
+    else result.riskLevel = "CRITICAL";
 
     // Recent violations
     result.recentViolations = license.auditLogs.slice(0, 10).map((log) => ({
@@ -120,15 +115,18 @@ export async function analyzeLicenseCompliance(
       description: (log.meta as any)?.reason || log.action,
     }));
 
-    // Recommendations
+    // Tier recommendations (simple heuristics)
     if (result.currentUsage >= result.usageLimit * 0.9) {
       result.recommendedTier = "UPGRADE";
-      result.reasoning = "License usage approaching limit. Consider upgrading to higher tier.";
+      result.reasoning = "License usage approaching limit. Consider upgrading to a higher tier.";
     } else if (result.currentUsage < result.usageLimit * 0.5) {
       result.recommendedTier = "DOWNGRADE";
-      result.costSavings = 1000; // Example savings
+      result.costSavings = 1000; // placeholder
       result.reasoning = "License usage is low. Consider downgrading to save costs.";
     }
+
+    // Clamp score to [0,100]
+    result.complianceScore = Math.max(0, Math.min(100, result.complianceScore));
 
     return result;
   } catch (error: any) {
@@ -141,32 +139,29 @@ async function getUsageHistory(
   tenantId: string,
   licenseId: string
 ): Promise<Array<{ date: Date; usage: number }>> {
-  // Get daily usage from audit logs
   const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-  
+
+  // ✅ IMPORTANT:
+  // Your schema expects `licenceId` (not `licenseId`)
+  // And tenantId is string for this model (per TS error)
   const logs = await prisma.licenseAuditLog.findMany({
     where: {
-      tenantId,
-      licenseId,
+      tenantId, // ✅ string
+      licenceId: licenseId, // ✅ British spelling (schema)
       action: "LICENSE_CHECKED",
-      createdAt: {
-        gte: thirtyDaysAgo,
-      },
+      createdAt: { gte: thirtyDaysAgo },
     },
-    select: {
-      createdAt: true,
-    },
+    select: { createdAt: true },
   });
 
-  // Group by day
   const dailyUsage = logs.reduce((acc: Record<string, number>, log) => {
-    const date = log.createdAt.toISOString().split("T")[0];
-    acc[date] = (acc[date] || 0) + 1;
+    const day = log.createdAt.toISOString().split("T")[0];
+    acc[day] = (acc[day] || 0) + 1;
     return acc;
   }, {});
 
   return Object.entries(dailyUsage).map(([date, usage]) => ({
     date: new Date(date),
-    usage: usage as number,
+    usage,
   }));
 }

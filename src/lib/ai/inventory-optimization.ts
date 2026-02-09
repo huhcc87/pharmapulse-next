@@ -10,32 +10,32 @@ export interface InventoryAnalysisResult {
   productId?: number;
   drugLibraryId?: number;
   analysisType: "REORDER" | "DEADSTOCK" | "EXPIRY" | "BUNDLE" | "PRICING";
-  
+
   // Reorder Analysis
   suggestedReorderQty?: number;
   reorderPoint?: number;
   safetyStock?: number;
   leadTimeDays?: number;
-  
+
   // Deadstock Prediction
   deadstockRiskScore?: number; // 0-100
   daysToDeadstock?: number;
   predictedSaleDate?: Date;
-  
+
   // Expiry Risk
   expiryRiskScore?: number; // 0-100
   daysToExpiry?: number;
   recommendedDiscount?: number; // Percentage
-  
+
   // Bundle Recommendations
   suggestedBundleIds?: number[];
   bundleScore?: number;
-  
+
   // Pricing
   recommendedPricePaise?: number;
   priceChangePercent?: number;
   pricingReason?: string;
-  
+
   confidenceScore?: number; // 0-100
   reasoning?: string;
 }
@@ -54,46 +54,35 @@ export async function analyzeInventoryOptimization(
 
     // Get product sales history (last 90 days)
     const salesHistory = await getSalesHistory(productId, drugLibraryId, tenantId);
-    
+
     // Get current inventory
     const inventory = await getCurrentInventory(productId, drugLibraryId, tenantId);
-    
+
     // Get batches with expiry info
     const batches = await getBatchesWithExpiry(productId, drugLibraryId, tenantId);
 
     // 1. Reorder Analysis
-    const reorderAnalysis = analyzeReorderPoint(
-      salesHistory,
-      inventory,
-      batches
-    );
-    results.push(reorderAnalysis);
+    results.push(analyzeReorderPoint(salesHistory, inventory, batches));
 
     // 2. Deadstock Prediction
-    const deadstockAnalysis = predictDeadstock(
-      salesHistory,
-      inventory,
-      batches
-    );
-    results.push(deadstockAnalysis);
+    results.push(predictDeadstock(salesHistory, inventory, batches));
 
     // 3. Expiry Risk Analysis
-    const expiryAnalysis = analyzeExpiryRisk(batches);
-    results.push(expiryAnalysis);
+    results.push(analyzeExpiryRisk(batches));
 
-    // 4. Bundle Recommendations
-    const bundleAnalysis = suggestBundles(productId, drugLibraryId, tenantId);
-    results.push(bundleAnalysis);
+    // 4. Bundle Recommendations ✅ await
+    results.push(await suggestBundles(productId, drugLibraryId, tenantId));
 
-    // 5. Pricing Suggestions
-    const pricingAnalysis = suggestPricing(
-      productId,
-      drugLibraryId,
-      salesHistory,
-      inventory,
-      tenantId
+    // 5. Pricing Suggestions ✅ object param (fixes TS error)
+    results.push(
+      await suggestPricing({
+        productId,
+        drugLibraryId,
+        salesHistory,
+        inventory,
+        tenantId,
+      })
     );
-    results.push(pricingAnalysis);
 
     return results;
   } catch (error: any) {
@@ -125,7 +114,8 @@ function analyzeReorderPoint(
     acc[date] = (acc[date] || 0) + (s.quantity || 0);
     return acc;
   }, {});
-  const maxDailyDemand = Math.max(...Object.values(dailyDemands));
+  const maxDailyDemand =
+    Object.values(dailyDemands).length > 0 ? Math.max(...Object.values(dailyDemands)) : 0;
 
   // Lead time (default 7 days for Indian market)
   const leadTimeDays = 7;
@@ -148,7 +138,9 @@ function analyzeReorderPoint(
     safetyStock: Math.max(0, safetyStock),
     leadTimeDays,
     confidenceScore: salesHistory.length >= 30 ? 85 : 60,
-    reasoning: `Based on ${last30Days.length} days of sales data. Average daily demand: ${avgDailyDemand.toFixed(1)}, Max daily demand: ${maxDailyDemand}, Safety stock: ${safetyStock}`,
+    reasoning: `Based on ${last30Days.length} days of sales data. Average daily demand: ${avgDailyDemand.toFixed(
+      1
+    )}, Max daily demand: ${maxDailyDemand}, Safety stock: ${safetyStock}`,
   };
 }
 
@@ -162,7 +154,7 @@ function predictDeadstock(
   batches: any[]
 ): InventoryAnalysisResult {
   const currentStock = inventory?.stockLevel || 0;
-  
+
   if (currentStock === 0) {
     return {
       analysisType: "DEADSTOCK",
@@ -184,38 +176,33 @@ function predictDeadstock(
 
   // Deadstock risk scoring (0-100)
   let deadstockRiskScore = 0;
-  if (daysToSellOut > 180) {
-    deadstockRiskScore = 90; // Very high risk
-  } else if (daysToSellOut > 120) {
-    deadstockRiskScore = 70; // High risk
-  } else if (daysToSellOut > 90) {
-    deadstockRiskScore = 50; // Medium risk
-  } else if (daysToSellOut > 60) {
-    deadstockRiskScore = 30; // Low risk
-  }
+  if (daysToSellOut > 180) deadstockRiskScore = 90;
+  else if (daysToSellOut > 120) deadstockRiskScore = 70;
+  else if (daysToSellOut > 90) deadstockRiskScore = 50;
+  else if (daysToSellOut > 60) deadstockRiskScore = 30;
 
   // Trend analysis (increasing/decreasing sales)
   const recent30Days = last60Days.slice(-30);
   const older30Days = last60Days.slice(0, 30);
   const recentSold = recent30Days.reduce((sum, s) => sum + (s.quantity || 0), 0);
   const olderSold = older30Days.reduce((sum, s) => sum + (s.quantity || 0), 0);
-  
-  if (recentSold < olderSold * 0.7) {
-    // Sales declining > 30%
+
+  if (olderSold > 0 && recentSold < olderSold * 0.7) {
     deadstockRiskScore = Math.min(100, deadstockRiskScore + 20);
   }
 
-  const predictedSaleDate = salesVelocity > 0
-    ? new Date(Date.now() + daysToSellOut * 24 * 60 * 60 * 1000)
-    : undefined;
+  const predictedSaleDate =
+    salesVelocity > 0 ? new Date(Date.now() + daysToSellOut * 24 * 60 * 60 * 1000) : undefined;
 
   return {
     analysisType: "DEADSTOCK",
     deadstockRiskScore,
-    daysToDeadstock: daysToSellOut > 999 ? undefined : daysToSellOut,
+    daysToDeadstock: daysToSellOut >= 999 ? undefined : daysToSellOut,
     predictedSaleDate,
     confidenceScore: salesHistory.length >= 60 ? 80 : 60,
-    reasoning: `Sales velocity: ${salesVelocity.toFixed(2)} units/day. Projected days to sell out: ${daysToSellOut}. Risk score based on sales trend and inventory level.`,
+    reasoning: `Sales velocity: ${salesVelocity.toFixed(
+      2
+    )} units/day. Projected days to sell out: ${daysToSellOut}. Risk score based on sales trend and inventory level.`,
   };
 }
 
@@ -231,19 +218,17 @@ function analyzeExpiryRisk(batches: any[]): InventoryAnalysisResult {
   for (const batch of batches) {
     if (batch.expiryDate) {
       const expiryDate = new Date(batch.expiryDate);
-      const daysToExpiry = Math.ceil((expiryDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24));
-      
+      const daysToExpiry = Math.ceil(
+        (expiryDate.getTime() - now.getTime()) / (1000 * 60 * 60 * 24)
+      );
+
       nearestExpiryDays = Math.min(nearestExpiryDays, daysToExpiry);
 
       // Calculate risk per batch
       let batchRisk = 0;
-      if (daysToExpiry <= 30) {
-        batchRisk = 90 + (30 - daysToExpiry) * 0.33; // 90-100 for <30 days
-      } else if (daysToExpiry <= 60) {
-        batchRisk = 70 + (60 - daysToExpiry) * 0.67; // 70-90 for 30-60 days
-      } else if (daysToExpiry <= 90) {
-        batchRisk = 50 + (90 - daysToExpiry) * 0.67; // 50-70 for 60-90 days
-      }
+      if (daysToExpiry <= 30) batchRisk = 90 + (30 - daysToExpiry) * 0.33;
+      else if (daysToExpiry <= 60) batchRisk = 70 + (60 - daysToExpiry) * 0.67;
+      else if (daysToExpiry <= 90) batchRisk = 50 + (90 - daysToExpiry) * 0.67;
 
       // Weight by quantity
       const qtyWeight = Math.min(1, (batch.quantityOnHand || 0) / 100);
@@ -252,16 +237,14 @@ function analyzeExpiryRisk(batches: any[]): InventoryAnalysisResult {
   }
 
   const expiryRiskScore = Math.min(100, totalExpiryRisk);
-  
+
   // Recommend discount based on days to expiry
   let recommendedDiscount = 0;
-  if (nearestExpiryDays <= 30) {
-    recommendedDiscount = 30 - (nearestExpiryDays / 30) * 10; // 20-30%
-  } else if (nearestExpiryDays <= 60) {
-    recommendedDiscount = 15 - ((nearestExpiryDays - 30) / 30) * 5; // 10-15%
-  } else if (nearestExpiryDays <= 90) {
-    recommendedDiscount = 10 - ((nearestExpiryDays - 60) / 30) * 5; // 5-10%
-  }
+  if (nearestExpiryDays <= 30) recommendedDiscount = 30 - (nearestExpiryDays / 30) * 10;
+  else if (nearestExpiryDays <= 60)
+    recommendedDiscount = 15 - ((nearestExpiryDays - 30) / 30) * 5;
+  else if (nearestExpiryDays <= 90)
+    recommendedDiscount = 10 - ((nearestExpiryDays - 60) / 30) * 5;
 
   return {
     analysisType: "EXPIRY",
@@ -269,7 +252,12 @@ function analyzeExpiryRisk(batches: any[]): InventoryAnalysisResult {
     daysToExpiry: nearestExpiryDays === Infinity ? undefined : nearestExpiryDays,
     recommendedDiscount: recommendedDiscount > 0 ? Math.round(recommendedDiscount) : undefined,
     confidenceScore: batches.length > 0 ? 90 : 0,
-    reasoning: `Nearest expiry in ${nearestExpiryDays} days. Recommended discount: ${recommendedDiscount.toFixed(1)}% to move inventory.`,
+    reasoning:
+      nearestExpiryDays === Infinity
+        ? "No batches with expiry dates available."
+        : `Nearest expiry in ${nearestExpiryDays} days. Recommended discount: ${recommendedDiscount.toFixed(
+            1
+          )}% to move inventory.`,
   };
 }
 
@@ -281,8 +269,6 @@ async function suggestBundles(
   drugLibraryId?: number,
   tenantId: number = 1
 ): Promise<InventoryAnalysisResult> {
-  // TODO: Implement bundle recommendation using collaborative filtering
-  // For now, return empty result
   return {
     analysisType: "BUNDLE",
     suggestedBundleIds: [],
@@ -296,15 +282,16 @@ async function suggestBundles(
  * Suggest pricing optimization
  * Based on demand elasticity, competitor prices, margin analysis
  */
-async function suggestPricing(
-  productId?: number,
-  drugLibraryId?: number,
-  salesHistory: any[],
-  inventory: any,
-  tenantId: number = 1
-): Promise<InventoryAnalysisResult> {
+async function suggestPricing(params: {
+  productId?: number;
+  drugLibraryId?: number;
+  salesHistory: any[];
+  inventory: any;
+  tenantId?: number;
+}): Promise<InventoryAnalysisResult> {
+  const { tenantId = 1 } = params;
+
   // TODO: Implement pricing optimization
-  // For now, return empty result
   return {
     analysisType: "PRICING",
     confidenceScore: 0,
@@ -319,15 +306,6 @@ async function getSalesHistory(
   drugLibraryId?: number,
   tenantId: number = 1
 ): Promise<any[]> {
-  // Get sales from InvoiceLineItems
-  const where: any = { tenantId };
-  if (productId) {
-    where.productId = productId;
-  }
-  if (drugLibraryId) {
-    where.drugLibraryId = drugLibraryId;
-  }
-
   const lineItems = await prisma.invoiceLineItem.findMany({
     where: {
       invoice: {
@@ -339,17 +317,13 @@ async function getSalesHistory(
     },
     include: {
       invoice: {
-        select: {
-          invoiceDate: true,
-        },
+        select: { invoiceDate: true },
       },
     },
     orderBy: {
-      invoice: {
-        invoiceDate: "desc",
-      },
+      invoice: { invoiceDate: "desc" },
     },
-    take: 200, // Last 200 transactions
+    take: 200,
   });
 
   return lineItems.map((item) => ({
@@ -385,12 +359,8 @@ async function getBatchesWithExpiry(
   tenantId: number = 1
 ): Promise<any[]> {
   const where: any = {};
-  if (productId) {
-    where.productId = productId;
-  }
-  if (drugLibraryId) {
-    where.drugLibraryId = drugLibraryId;
-  }
+  if (productId) where.productId = productId;
+  if (drugLibraryId) where.drugLibraryId = drugLibraryId;
 
   return await prisma.batch.findMany({
     where,
@@ -400,8 +370,6 @@ async function getBatchesWithExpiry(
       expiryDate: true,
       quantityOnHand: true,
     },
-    orderBy: {
-      expiryDate: "asc",
-    },
+    orderBy: { expiryDate: "asc" },
   });
 }

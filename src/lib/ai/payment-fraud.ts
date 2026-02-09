@@ -20,38 +20,52 @@ export interface PaymentRiskResult {
   reasoning?: string;
 }
 
+function toStr(value: string | number, label: string): string {
+  const s = String(value ?? "").trim();
+  if (!s) throw new Error(`Invalid ${label}`);
+  return s;
+}
+
+function toFiniteNumberOrNull(v: unknown): number | null {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "") {
+    const n = Number(v);
+    if (Number.isFinite(n)) return n;
+  }
+  return null;
+}
+
 /**
  * Analyze payment for fraud risk
  */
 export async function analyzePaymentRisk(
-  tenantId: string,
+  tenantId: string | number,
   paymentId: string
 ): Promise<PaymentRiskResult> {
   try {
+    const tenantIdStr = toStr(tenantId, "tenantId");
+
     const result: PaymentRiskResult = {
       riskScore: 0,
       riskLevel: "LOW",
       isFraudulent: false,
     };
 
-    // Get payment
+    // ✅ IMPORTANT FIX:
+    // Your schema supports `invoices` relation (plural).
+    // But BillingInvoice does NOT have `customer` relation field (per error),
+    // so we include invoices only (no nested include).
     const payment = await prisma.billingPayment.findUnique({
       where: { id: paymentId },
       include: {
-        invoice: {
-          include: {
-            customer: true,
-          },
-        },
+        invoices: true,
       },
     });
 
-    if (!payment) {
-      throw new Error("Payment not found");
-    }
+    if (!payment) throw new Error("Payment not found");
 
     // Analyze payment
-    const fraudIndicators = await detectFraudIndicators(tenantId, payment);
+    const fraudIndicators = await detectFraudIndicators(tenantIdStr, payment as any);
     result.fraudIndicators = fraudIndicators;
 
     // Calculate risk score
@@ -71,13 +85,13 @@ export async function analyzePaymentRisk(
     }
 
     // Chargeback prediction
-    const chargebackPrediction = await predictChargeback(tenantId, payment);
+    const chargebackPrediction = await predictChargeback(tenantIdStr);
     result.chargebackProbability = chargebackPrediction.probability;
     result.chargebackRiskFactors = chargebackPrediction.riskFactors;
 
     // Generate recommendation
     result.recommendation = generateRecommendation(result);
-    result.reasoning = generateReasoning(result, payment);
+    result.reasoning = generateReasoning(result);
 
     return result;
   } catch (error: any) {
@@ -89,38 +103,39 @@ export async function analyzePaymentRisk(
 async function detectFraudIndicators(
   tenantId: string,
   payment: any
-): Promise<Array<{
-  type: string;
-  severity: "LOW" | "MEDIUM" | "HIGH";
-  description: string;
-}>> {
+): Promise<
+  Array<{
+    type: string;
+    severity: "LOW" | "MEDIUM" | "HIGH";
+    description: string;
+  }>
+> {
   const indicators: Array<{
     type: string;
     severity: "LOW" | "MEDIUM" | "HIGH";
     description: string;
   }> = [];
 
-  // Check for unusual amount
+  // 1) Unusual amount vs average (tenant-level)
   const avgPayment = await getAveragePayment(tenantId);
-  if (avgPayment > 0) {
-    const paymentAmount = payment.amountPaise || 0;
-    if (paymentAmount > avgPayment * 3) {
-      indicators.push({
-        type: "UNUSUAL_AMOUNT",
-        severity: "MEDIUM",
-        description: `Payment amount (₹${(paymentAmount / 100).toFixed(2)}) is 3x higher than average (₹${(avgPayment / 100).toFixed(2)})`,
-      });
-    }
+  const paymentAmount = payment.amountPaise || 0;
+
+  if (avgPayment > 0 && paymentAmount > avgPayment * 3) {
+    indicators.push({
+      type: "UNUSUAL_AMOUNT",
+      severity: "MEDIUM",
+      description: `Payment amount (₹${(paymentAmount / 100).toFixed(
+        2
+      )}) is 3x higher than average (₹${(avgPayment / 100).toFixed(2)})`,
+    });
   }
 
-  // Check for multiple failed attempts
+  // 2) Multiple failed attempts in last 24h (tenant-level)
   const failedAttempts = await prisma.billingPayment.count({
     where: {
       tenantId,
       status: "FAILED",
-      createdAt: {
-        gte: new Date(Date.now() - 24 * 60 * 60 * 1000), // Last 24 hours
-      },
+      createdAt: { gte: new Date(Date.now() - 24 * 60 * 60 * 1000) },
     },
   });
 
@@ -132,14 +147,12 @@ async function detectFraudIndicators(
     });
   }
 
-  // Check for rapid payments
+  // 3) Rapid successful payments in last 1h (tenant-level)
   const recentPayments = await prisma.billingPayment.count({
     where: {
       tenantId,
       status: "SUCCESS",
-      createdAt: {
-        gte: new Date(Date.now() - 1 * 60 * 60 * 1000), // Last 1 hour
-      },
+      createdAt: { gte: new Date(Date.now() - 60 * 60 * 1000) },
     },
   });
 
@@ -151,7 +164,7 @@ async function detectFraudIndicators(
     });
   }
 
-  // Check payment method
+  // 4) Card sanity check
   if (payment.paymentMethod === "CARD" && !payment.cardLast4) {
     indicators.push({
       type: "INCOMPLETE_CARD_INFO",
@@ -160,17 +173,32 @@ async function detectFraudIndicators(
     });
   }
 
-  // Check for new customer with high amount
-  if (payment.invoice?.customer) {
-    const customerAge = new Date().getTime() - new Date(payment.invoice.customer.createdAt).getTime();
-    const daysSinceCreation = customerAge / (1000 * 60 * 60 * 24);
-    
-    if (daysSinceCreation < 1 && (payment.amountPaise || 0) > 100000) {
-      indicators.push({
-        type: "NEW_CUSTOMER_HIGH_AMOUNT",
-        severity: "HIGH",
-        description: "New customer making high-value payment",
-      });
+  // 5) New customer + high amount (BEST-EFFORT, schema-safe)
+  // We can’t rely on invoices.customer relation. We’ll:
+  // - look for invoices[0].customerId if present
+  // - if numeric, fetch prisma.customer.createdAt
+  const firstInvoice = Array.isArray(payment.invoices) ? payment.invoices[0] : null;
+  const customerIdMaybe = firstInvoice?.customerId;
+  const customerIdNum = toFiniteNumberOrNull(customerIdMaybe);
+
+  if (customerIdNum && paymentAmount > 100000) {
+    // ₹1,000+
+    const customer = await prisma.customer.findUnique({
+      where: { id: customerIdNum },
+      select: { createdAt: true },
+    });
+
+    if (customer?.createdAt) {
+      const customerAgeDays =
+        (Date.now() - new Date(customer.createdAt).getTime()) / (1000 * 60 * 60 * 24);
+
+      if (customerAgeDays < 1) {
+        indicators.push({
+          type: "NEW_CUSTOMER_HIGH_AMOUNT",
+          severity: "HIGH",
+          description: "New customer making high-value payment",
+        });
+      }
     }
   }
 
@@ -187,13 +215,9 @@ function calculateRiskScore(
   let score = 0;
 
   for (const indicator of indicators) {
-    if (indicator.severity === "HIGH") {
-      score += 30;
-    } else if (indicator.severity === "MEDIUM") {
-      score += 15;
-    } else {
-      score += 5;
-    }
+    if (indicator.severity === "HIGH") score += 30;
+    else if (indicator.severity === "MEDIUM") score += 15;
+    else score += 5;
   }
 
   return Math.min(100, score);
@@ -204,37 +228,27 @@ async function getAveragePayment(tenantId: string): Promise<number> {
     where: {
       tenantId,
       status: "SUCCESS",
-      createdAt: {
-        gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000), // Last 30 days
-      },
+      createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
     },
     take: 100,
+    select: { amountPaise: true },
   });
 
-  if (payments.length === 0) {
-    return 0;
-  }
+  if (payments.length === 0) return 0;
 
   const total = payments.reduce((sum, p) => sum + (p.amountPaise || 0), 0);
   return total / payments.length;
 }
 
 async function predictChargeback(
-  tenantId: string,
-  payment: any
-): Promise<{
-  probability: number;
-  riskFactors: string[];
-}> {
+  tenantId: string
+): Promise<{ probability: number; riskFactors: string[] }> {
   const riskFactors: string[] = [];
   let probability = 0;
 
-  // Check for chargeback history
+  // Chargeback history (tenant-level)
   const chargebackHistory = await prisma.billingPayment.count({
-    where: {
-      tenantId,
-      status: "CHARGEBACK",
-    },
+    where: { tenantId, status: "CHARGEBACK" },
   });
 
   if (chargebackHistory > 0) {
@@ -242,27 +256,12 @@ async function predictChargeback(
     riskFactors.push("Previous chargeback history");
   }
 
-  // Check payment amount
-  const paymentAmount = payment.amountPaise || 0;
-  if (paymentAmount > 500000) { // ₹5,000
-    probability += 15;
-    riskFactors.push("High payment amount");
-  }
-
-  // Check payment method
-  if (payment.paymentMethod === "CARD") {
-    probability += 10;
-    riskFactors.push("Card payment (higher chargeback risk)");
-  }
-
-  // Check for refund requests
+  // Multiple recent refunds (tenant-level)
   const refundRequests = await prisma.billingPayment.count({
     where: {
       tenantId,
       status: "REFUNDED",
-      createdAt: {
-        gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // Last 7 days
-      },
+      createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
     },
   });
 
@@ -271,32 +270,25 @@ async function predictChargeback(
     riskFactors.push("Multiple recent refunds");
   }
 
-  return {
-    probability: Math.min(100, probability),
-    riskFactors,
-  };
+  return { probability: Math.min(100, probability), riskFactors };
 }
 
 function generateRecommendation(result: PaymentRiskResult): string {
   if (result.riskLevel === "CRITICAL" || result.riskLevel === "HIGH") {
     return "Review payment manually. Consider requiring additional verification.";
-  } else if (result.riskLevel === "MEDIUM") {
-    return "Monitor payment closely. Consider additional verification for future payments.";
-  } else {
-    return "Payment appears safe. No action required.";
   }
+  if (result.riskLevel === "MEDIUM") {
+    return "Monitor payment closely. Consider additional verification for future payments.";
+  }
+  return "Payment appears safe. No action required.";
 }
 
-function generateReasoning(result: PaymentRiskResult, payment: any): string {
+function generateReasoning(result: PaymentRiskResult): string {
   let reasoning = `Payment risk analysis: ${result.riskLevel} risk (${result.riskScore}/100). `;
-
-  if (result.fraudIndicators && result.fraudIndicators.length > 0) {
-    reasoning += `Found ${result.fraudIndicators.length} fraud indicator(s). `;
-  }
-
-  if (result.chargebackProbability && result.chargebackProbability > 30) {
+  const indicatorCount = result.fraudIndicators?.length || 0;
+  if (indicatorCount > 0) reasoning += `Found ${indicatorCount} fraud indicator(s). `;
+  if ((result.chargebackProbability || 0) > 30) {
     reasoning += `Chargeback probability: ${result.chargebackProbability}%. `;
   }
-
   return reasoning;
 }

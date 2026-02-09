@@ -1,3 +1,4 @@
+// src/lib/pwa/push-notifications.ts
 // PWA Push Notifications
 // Web Push API integration for browser notifications
 
@@ -17,19 +18,18 @@ export class PushNotificationManager {
    * Initialize push notifications
    */
   async initialize(): Promise<boolean> {
-    if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
-      return false;
-    }
+    if (typeof window === "undefined") return false;
+    if (!("serviceWorker" in navigator)) return false;
+    if (!("PushManager" in window)) return false;
+    if (!("Notification" in window)) return false;
 
     try {
-      // Register service worker
+      // Service worker should already be registered elsewhere; wait until ready
       this.registration = await navigator.serviceWorker.ready;
-      
+
       // Request notification permission
       const permission = await Notification.requestPermission();
-      if (permission !== 'granted') {
-        return false;
-      }
+      if (permission !== "granted") return false;
 
       // Get existing subscription or create new one
       this.subscription = await this.registration.pushManager.getSubscription();
@@ -39,7 +39,7 @@ export class PushNotificationManager {
 
       return this.subscription !== null;
     } catch (error) {
-      console.error('Error initializing push notifications:', error);
+      console.error("Error initializing push notifications:", error);
       return false;
     }
   }
@@ -50,17 +50,27 @@ export class PushNotificationManager {
   private async createSubscription(): Promise<PushSubscription | null> {
     if (!this.registration) return null;
 
+    const vapidPublicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || "";
+    if (!vapidPublicKey) {
+      console.warn(
+        "NEXT_PUBLIC_VAPID_PUBLIC_KEY is missing. Push subscription not created."
+      );
+      return null;
+    }
+
     try {
+      // IMPORTANT:
+      // Return ArrayBuffer so TS accepts it as BufferSource without ArrayBufferLike/SharedArrayBuffer mismatch.
+      const applicationServerKey = this.urlBase64ToArrayBuffer(vapidPublicKey);
+
       const subscription = await this.registration.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: this.urlBase64ToUint8Array(
-          process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY || ''
-        ),
+        applicationServerKey, // ArrayBuffer is a valid BufferSource
       });
 
       return subscription;
     } catch (error) {
-      console.error('Error creating push subscription:', error);
+      console.error("Error creating push subscription:", error);
       return null;
     }
   }
@@ -72,12 +82,10 @@ export class PushNotificationManager {
     if (!this.subscription) {
       await this.initialize();
     }
-
     if (!this.subscription) return null;
 
-    const key = this.subscription.getKey('p256dh');
-    const auth = this.subscription.getKey('auth');
-
+    const key = this.subscription.getKey("p256dh");
+    const auth = this.subscription.getKey("auth");
     if (!key || !auth) return null;
 
     return {
@@ -100,7 +108,7 @@ export class PushNotificationManager {
       this.subscription = null;
       return true;
     } catch (error) {
-      console.error('Error unsubscribing:', error);
+      console.error("Error unsubscribing:", error);
       return false;
     }
   }
@@ -110,10 +118,10 @@ export class PushNotificationManager {
    */
   isSupported(): boolean {
     return (
-      typeof window !== 'undefined' &&
-      'serviceWorker' in navigator &&
-      'PushManager' in window &&
-      'Notification' in window
+      typeof window !== "undefined" &&
+      "serviceWorker" in navigator &&
+      "PushManager" in window &&
+      "Notification" in window
     );
   }
 
@@ -121,28 +129,30 @@ export class PushNotificationManager {
    * Check notification permission
    */
   async getPermission(): Promise<NotificationPermission> {
-    if (typeof window === 'undefined' || !('Notification' in window)) {
-      return 'denied';
+    if (typeof window === "undefined" || !("Notification" in window)) {
+      return "denied";
     }
     return Notification.permission;
   }
 
   /**
-   * Convert VAPID key from base64 URL to Uint8Array
+   * Convert VAPID key from base64url to ArrayBuffer (BufferSource-safe for TS)
    */
-  private urlBase64ToUint8Array(base64String: string): Uint8Array {
-    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
-    const base64 = (base64String + padding)
-      .replace(/\-/g, '+')
-      .replace(/_/g, '/');
+  private urlBase64ToArrayBuffer(base64UrlString: string): ArrayBuffer {
+    const padding = "=".repeat((4 - (base64UrlString.length % 4)) % 4);
+    const base64 = (base64UrlString + padding)
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
 
-    const rawData = window.atob(base64);
-    const outputArray = new Uint8Array(rawData.length);
+    const raw = window.atob(base64);
 
-    for (let i = 0; i < rawData.length; ++i) {
-      outputArray[i] = rawData.charCodeAt(i);
+    // Uint8Array is backed by a real ArrayBuffer
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) {
+      bytes[i] = raw.charCodeAt(i);
     }
-    return outputArray;
+
+    return bytes.buffer;
   }
 
   /**
@@ -150,7 +160,7 @@ export class PushNotificationManager {
    */
   private arrayBufferToBase64(buffer: ArrayBuffer): string {
     const bytes = new Uint8Array(buffer);
-    let binary = '';
+    let binary = "";
     for (let i = 0; i < bytes.byteLength; i++) {
       binary += String.fromCharCode(bytes[i]);
     }

@@ -1,3 +1,4 @@
+// src/lib/copilot/rules-provider.ts
 // Deterministic drug interaction rules provider
 // In production, this would load from a database or external API
 
@@ -65,12 +66,7 @@ const INTERACTION_RULES: DrugInteractionRule[] = [
   },
 ];
 
-/**
- * Check for drug interactions using deterministic rules
- */
-export function checkInteractionsRules(
-  drugNames: string[]
-): Array<{
+type RuleInteraction = {
   drug1: string;
   drug2: string;
   severity: "HIGH" | "MEDIUM" | "LOW";
@@ -78,8 +74,13 @@ export function checkInteractionsRules(
   mechanism: string;
   recommendation: string;
   source: "RULES";
-}> {
-  const interactions: any[] = [];
+};
+
+/**
+ * Check for drug interactions using deterministic rules
+ */
+export function checkInteractionsRules(drugNames: string[]): RuleInteraction[] {
+  const interactions: RuleInteraction[] = [];
 
   // Check all pairs
   for (let i = 0; i < drugNames.length; i++) {
@@ -87,15 +88,16 @@ export function checkInteractionsRules(
       const drug1 = drugNames[i];
       const drug2 = drugNames[j];
 
-      // Check rules
       for (const rule of INTERACTION_RULES) {
-        const match1 = typeof rule.drug1Pattern === "string"
-          ? drug1.toLowerCase().includes(rule.drug1Pattern.toLowerCase())
-          : rule.drug1Pattern.test(drug1);
-        
-        const match2 = typeof rule.drug2Pattern === "string"
-          ? drug2.toLowerCase().includes(rule.drug2Pattern.toLowerCase())
-          : rule.drug2Pattern.test(drug2);
+        const match1 =
+          typeof rule.drug1Pattern === "string"
+            ? drug1.toLowerCase().includes(rule.drug1Pattern.toLowerCase())
+            : rule.drug1Pattern.test(drug1);
+
+        const match2 =
+          typeof rule.drug2Pattern === "string"
+            ? drug2.toLowerCase().includes(rule.drug2Pattern.toLowerCase())
+            : rule.drug2Pattern.test(drug2);
 
         if (match1 && match2) {
           interactions.push({
@@ -118,21 +120,23 @@ export function checkInteractionsRules(
 
 /**
  * Check for duplicate therapy (same drug multiple times)
+ * NOTE: Avoid iterating MapIterator for older TS targets (no downlevelIteration).
  */
-export function checkDuplicateTherapy(drugNames: string[]): Array<{
-  drug: string;
-  count: number;
-  message: string;
-}> {
-  const counts = new Map<string, number>();
-  
+export function checkDuplicateTherapy(
+  drugNames: string[]
+): Array<{ drug: string; count: number; message: string }> {
+  const counts: Record<string, number> = {};
+
   for (const drug of drugNames) {
     const normalized = drug.toLowerCase().trim();
-    counts.set(normalized, (counts.get(normalized) || 0) + 1);
+    counts[normalized] = (counts[normalized] || 0) + 1;
   }
 
-  const duplicates: any[] = [];
-  for (const [drug, count] of counts.entries()) {
+  const duplicates: Array<{ drug: string; count: number; message: string }> = [];
+
+  // Object.keys works in any TS target
+  for (const drug of Object.keys(counts)) {
+    const count = counts[drug];
     if (count > 1) {
       duplicates.push({
         drug,

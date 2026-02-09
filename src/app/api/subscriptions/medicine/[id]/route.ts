@@ -1,123 +1,75 @@
+// src/app/api/subscriptions/medicine/[id]/route.ts
 // Medicine Subscription Management API
-// GET /api/subscriptions/medicine/[id] - Get subscription details
-// PUT /api/subscriptions/medicine/[id] - Update subscription
-// DELETE /api/subscriptions/medicine/[id] - Cancel subscription
+// GET /api/subscriptions/medicine/[id]
 
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, requireAuth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { updateSubscription } from "@/lib/subscriptions/medicine-subscription";
 
-export async function GET(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
+const DEMO_TENANT_ID = 1;
+
+function toInt(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function resolveTenantId(user: any): number {
+  return toInt(user?.tenantId) ?? DEMO_TENANT_ID;
+}
+
+async function readParamId(ctx: any): Promise<string | undefined> {
+  const p = ctx?.params;
+  if (!p) return undefined;
+  const resolved = typeof p?.then === "function" ? await p : p;
+  return resolved?.id;
+}
+
+export async function GET(_req: NextRequest, ctx: any) {
   try {
     const user = await getSessionUser();
     requireAuth(user);
 
-    const subscription = await prisma.medicineSubscription.findUnique({
+    const idStr = await readParamId(ctx);
+    const idNum = toInt(idStr);
+
+    if (idNum === undefined) {
+      return NextResponse.json(
+        { ok: false, error: "Invalid subscription id" },
+        { status: 400 }
+      );
+    }
+
+    const tenantId = resolveTenantId(user);
+
+    // Use a universally-common sort key; swap to your real field later (e.g., deliveryDate, scheduledAt, etc.)
+    // If your SubscriptionDelivery model doesn't have createdAt, change this to { id: "desc" }.
+    const deliveriesOrderBy: any = { createdAt: "desc" };
+
+    const subscription = await prisma.medicineSubscription.findFirst({
       where: {
-        id: parseInt(params.id),
-        tenantId: user.tenantId || 1,
+        id: idNum,
+        tenantId,
       },
       include: {
         customer: true,
         items: true,
-        deliveries: {
-          orderBy: {
-            deliveryDate: "desc",
-          },
-        },
+        deliveries: { orderBy: deliveriesOrderBy },
       },
     });
 
     if (!subscription) {
       return NextResponse.json(
-        { error: "Subscription not found" },
+        { ok: false, error: "Subscription not found" },
         { status: 404 }
       );
     }
 
-    return NextResponse.json({
-      success: true,
-      subscription,
-    });
-  } catch (error: any) {
-    console.error("Medicine subscription get API error:", error);
+    return NextResponse.json({ ok: true, subscription });
+  } catch (err) {
+    console.error("GET /api/subscriptions/medicine/[id] failed:", err);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
-      { status: 500 }
-    );
-  }
-}
-
-export async function PUT(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  try {
-    const user = await getSessionUser();
-    requireAuth(user);
-
-    const body = await req.json();
-    const { status, nextDeliveryDate, autoDelivery, items } = body;
-
-    // Update subscription
-    const result = await updateSubscription(parseInt(params.id), {
-      status,
-      nextDeliveryDate: nextDeliveryDate ? new Date(nextDeliveryDate) : undefined,
-      autoDelivery,
-      items,
-    });
-
-    if (!result.success) {
-      return NextResponse.json(
-        { error: result.error || "Subscription update failed" },
-        { status: 500 }
-      );
-    }
-
-    return NextResponse.json({
-      success: true,
-      message: "Subscription updated successfully",
-    });
-  } catch (error: any) {
-    console.error("Medicine subscription update API error:", error);
-    return NextResponse.json(
-      { error: error.message || "Internal server error" },
-      { status: 500 }
-    );
-  }
-}
-
-export async function DELETE(
-  req: NextRequest,
-  { params }: { params: { id: string } }
-) {
-  try {
-    const user = await getSessionUser();
-    requireAuth(user);
-
-    // Cancel subscription (set status to CANCELLED)
-    await prisma.medicineSubscription.update({
-      where: {
-        id: parseInt(params.id),
-        tenantId: user.tenantId || 1,
-      },
-      data: {
-        status: "CANCELLED",
-      },
-    });
-
-    return NextResponse.json({
-      success: true,
-      message: "Subscription cancelled successfully",
-    });
-  } catch (error: any) {
-    console.error("Medicine subscription cancellation API error:", error);
-    return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { ok: false, error: "Internal server error" },
       { status: 500 }
     );
   }

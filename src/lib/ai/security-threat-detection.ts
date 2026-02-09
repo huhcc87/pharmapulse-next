@@ -1,12 +1,16 @@
+// src/lib/ai/security-threat-detection.ts
 // AI Threat Detection & Anomaly Detection
 // Real-time login anomaly detection, behavioral biometrics, suspicious activity scoring
 
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 
 export interface ThreatDetectionResult {
-  threatType: "LOGIN_ANOMALY" | "BEHAVIORAL_ANOMALY" | "SUSPICIOUS_ACTIVITY" | "DEVICE_ANOMALY";
+  threatType:
+    | "LOGIN_ANOMALY"
+    | "BEHAVIORAL_ANOMALY"
+    | "SUSPICIOUS_ACTIVITY"
+    | "DEVICE_ANOMALY";
   riskScore: number; // 0-100
   severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   isLoginAnomaly: boolean;
@@ -15,6 +19,32 @@ export interface ThreatDetectionResult {
   isLocationAnomaly: boolean;
   autoBlocked: boolean;
   reasoning?: string;
+}
+
+/**
+ * Prisma Decimal -> number (safe-ish)
+ * Handles: Decimal, string, number, null/undefined
+ */
+function toNumber(value: unknown, fallback = 0): number {
+  if (value == null) return fallback;
+  if (typeof value === "number") return Number.isFinite(value) ? value : fallback;
+  if (typeof value === "string") {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+  // Prisma.Decimal instance
+  if (value instanceof Prisma.Decimal) {
+    const n = value.toNumber();
+    return Number.isFinite(n) ? n : fallback;
+  }
+  // Some Decimal-like objects have toNumber()
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const maybe = value as any;
+  if (typeof maybe?.toNumber === "function") {
+    const n = maybe.toNumber();
+    return typeof n === "number" && Number.isFinite(n) ? n : fallback;
+  }
+  return fallback;
 }
 
 /**
@@ -41,7 +71,7 @@ export async function detectSecurityThreat(
       autoBlocked: false,
     };
 
-    // 1. Login Anomaly Detection
+    // 1) Login Anomaly Detection
     if (userId) {
       const loginAnomaly = await detectLoginAnomaly(userId, tenantId, ipAddress, deviceId);
       result.isLoginAnomaly = loginAnomaly.isAnomaly;
@@ -52,7 +82,7 @@ export async function detectSecurityThreat(
       }
     }
 
-    // 2. Time Anomaly Detection
+    // 2) Time Anomaly Detection
     const timeAnomaly = detectTimeAnomaly();
     result.isTimeAnomaly = timeAnomaly.isAnomaly;
     if (timeAnomaly.isAnomaly) {
@@ -60,7 +90,7 @@ export async function detectSecurityThreat(
       result.reasoning = (result.reasoning || "") + ` ${timeAnomaly.reason}`;
     }
 
-    // 3. Location Anomaly Detection
+    // 3) Location Anomaly Detection
     if (location && userId) {
       const locationAnomaly = await detectLocationAnomaly(userId, tenantId, location);
       result.isLocationAnomaly = locationAnomaly.isAnomaly;
@@ -70,7 +100,7 @@ export async function detectSecurityThreat(
       }
     }
 
-    // 4. Device Anomaly Detection
+    // 4) Device Anomaly Detection
     if (deviceId && userId) {
       const deviceAnomaly = await detectDeviceAnomaly(userId, tenantId, deviceId);
       if (deviceAnomaly.isAnomaly) {
@@ -80,9 +110,8 @@ export async function detectSecurityThreat(
       }
     }
 
-    // 5. Behavioral Anomaly Detection (if typing/mouse patterns available)
-    // This would require client-side data collection
-    // For now, we'll skip it
+    // 5) Behavioral Anomaly Detection (future)
+    // (needs client-side telemetry)
 
     // Determine severity
     if (result.riskScore >= 80) {
@@ -104,7 +133,7 @@ export async function detectSecurityThreat(
 
 /**
  * Detect login anomalies
- * Checks: unusual time, location, device, frequency
+ * Checks: unusual IP, device, rapid frequency
  */
 async function detectLoginAnomaly(
   userId: string,
@@ -116,62 +145,40 @@ async function detectLoginAnomaly(
   riskScore: number;
   reason?: string;
 }> {
-  // Get recent login history (last 30 days)
   const recentLogins = await prisma.securityEvent.findMany({
     where: {
       tenantId,
       userId,
       eventType: "LOGIN_SUCCESS",
-      createdAt: {
-        gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
-      },
+      createdAt: { gte: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
     },
-    orderBy: {
-      createdAt: "desc",
-    },
+    orderBy: { createdAt: "desc" },
     take: 50,
   });
 
-  if (recentLogins.length === 0) {
-    // First login - not necessarily anomalous
-    return { isAnomaly: false, riskScore: 0 };
-  }
+  if (recentLogins.length === 0) return { isAnomaly: false, riskScore: 0 };
 
-  // Check for unusual IP
   if (ipAddress) {
-    const knownIPs = new Set(recentLogins.map((e) => e.ipAddress).filter(Boolean));
+    const knownIPs = new Set(recentLogins.map((e) => e.ipAddress).filter(Boolean) as string[]);
     if (!knownIPs.has(ipAddress)) {
-      return {
-        isAnomaly: true,
-        riskScore: 40,
-        reason: "Login from new IP address",
-      };
+      return { isAnomaly: true, riskScore: 40, reason: "Login from new IP address" };
     }
   }
 
-  // Check for unusual device
   if (deviceId) {
-    const knownDevices = new Set(recentLogins.map((e) => e.deviceId).filter(Boolean));
+    const knownDevices = new Set(
+      recentLogins.map((e) => e.deviceId).filter(Boolean) as string[]
+    );
     if (!knownDevices.has(deviceId)) {
-      return {
-        isAnomaly: true,
-        riskScore: 50,
-        reason: "Login from new device",
-      };
+      return { isAnomaly: true, riskScore: 50, reason: "Login from new device" };
     }
   }
 
-  // Check for rapid successive logins (possible brute force)
   if (recentLogins.length >= 2) {
     const lastTwo = recentLogins.slice(0, 2);
     const timeDiff = lastTwo[0].createdAt.getTime() - lastTwo[1].createdAt.getTime();
-    if (timeDiff < 60000) {
-      // Less than 1 minute
-      return {
-        isAnomaly: true,
-        riskScore: 30,
-        reason: "Rapid successive logins detected",
-      };
+    if (timeDiff < 60_000) {
+      return { isAnomaly: true, riskScore: 30, reason: "Rapid successive logins detected" };
     }
   }
 
@@ -179,65 +186,41 @@ async function detectLoginAnomaly(
 }
 
 /**
- * Detect time anomalies
- * Unusual login times (outside normal hours)
+ * Detect time anomalies (outside normal hours)
  */
-function detectTimeAnomaly(): {
-  isAnomaly: boolean;
-  reason?: string;
-} {
+function detectTimeAnomaly(): { isAnomaly: boolean; reason?: string } {
   const hour = new Date().getHours();
-  
-  // Normal hours: 8 AM - 10 PM (Indian pharmacy hours)
+  // Normal hours: 8 AM - 10 PM
   if (hour < 8 || hour > 22) {
-    return {
-      isAnomaly: true,
-      reason: `Login at unusual time: ${hour}:00`,
-    };
+    return { isAnomaly: true, reason: `Login at unusual time: ${hour}:00` };
   }
-
   return { isAnomaly: false };
 }
 
 /**
  * Detect location anomalies
- * Login from different country/region
  */
 async function detectLocationAnomaly(
   userId: string,
   tenantId: string,
   currentLocation: string
-): Promise<{
-  isAnomaly: boolean;
-  reason?: string;
-}> {
-  // Get recent login locations
-  const recentLogins = await prisma.aISecurityThreat.findMany({
+): Promise<{ isAnomaly: boolean; reason?: string }> {
+  const recent = await prisma.aISecurityThreat.findMany({
     where: {
       tenantId,
       userId,
       location: { not: null },
-      createdAt: {
-        gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), // Last 7 days
-      },
+      createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
     },
-    select: {
-      location: true,
-    },
+    select: { location: true },
     take: 10,
   });
 
-  if (recentLogins.length === 0) {
-    return { isAnomaly: false };
-  }
+  if (recent.length === 0) return { isAnomaly: false };
 
-  // Check if location changed significantly
-  const knownLocations = new Set(recentLogins.map((t) => t.location).filter(Boolean));
+  const knownLocations = new Set(recent.map((t) => t.location).filter(Boolean) as string[]);
   if (!knownLocations.has(currentLocation)) {
-    return {
-      isAnomaly: true,
-      reason: `Login from new location: ${currentLocation}`,
-    };
+    return { isAnomaly: true, reason: `Login from new location: ${currentLocation}` };
   }
 
   return { isAnomaly: false };
@@ -245,31 +228,28 @@ async function detectLocationAnomaly(
 
 /**
  * Detect device anomalies
- * Unusual device characteristics
+ *
+ * FIX:
+ * trustScore is Prisma Decimal -> convert to number before comparing.
  */
 async function detectDeviceAnomaly(
   userId: string,
   tenantId: string,
   deviceId: string
-): Promise<{
-  isAnomaly: boolean;
-  reason?: string;
-}> {
-  // Check device fingerprint trust score
+): Promise<{ isAnomaly: boolean; reason?: string }> {
   const fingerprint = await prisma.aIDeviceFingerprint.findFirst({
-    where: {
-      tenantId,
-      deviceId,
-    },
-    orderBy: {
-      createdAt: "desc",
-    },
+    where: { tenantId, deviceId },
+    orderBy: { createdAt: "desc" },
   });
 
-  if (fingerprint && fingerprint.trustScore < 50) {
+  if (!fingerprint) return { isAnomaly: false };
+
+  const trustScoreNum = toNumber((fingerprint as any).trustScore, 0);
+
+  if (trustScoreNum < 50) {
     return {
       isAnomaly: true,
-      reason: `Device has low trust score: ${fingerprint.trustScore}`,
+      reason: `Device has low trust score: ${trustScoreNum}`,
     };
   }
 

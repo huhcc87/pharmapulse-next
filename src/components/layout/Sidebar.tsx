@@ -3,18 +3,17 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useState, useEffect } from 'react';
-import { 
-  LayoutDashboard, 
-  ShoppingCart, 
-  Package, 
-  Brain, 
-  Pill, 
-  BarChart3, 
-  FileText, 
-  Smartphone, 
-  Users, 
+import {
+  LayoutDashboard,
+  ShoppingCart,
+  Package,
+  Brain,
+  Pill,
+  BarChart3,
+  FileText,
+  Smartphone,
+  Users,
   Settings,
-  Keyboard
 } from 'lucide-react';
 import { ShortcutsHelpButton } from '@/components/keyboard-shortcuts/ShortcutsHelpButton';
 
@@ -32,12 +31,15 @@ const menuItems = [
 ];
 
 export default function Sidebar() {
-  const pathname = usePathname();
+  const pathnameRaw = usePathname();
+  const pathname = pathnameRaw ?? '';
+
   const [userPermissions, setUserPermissions] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     checkPermissions();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const checkPermissions = async () => {
@@ -54,23 +56,27 @@ export default function Sidebar() {
 
         if (res.ok) {
           const data = await res.json();
-          const perms = new Set(data.permissions || []);
+          const perms = new Set<string>(data.permissions || []);
+
           // Owner has all permissions
           if (data.roles?.includes('OWNER')) {
             perms.add('ANALYTICS_VIEW');
           }
+
           setUserPermissions(perms);
         } else {
           // Non-200 response is fine - continue with empty permissions
           if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
-            console.debug('[Sidebar] Permissions API returned non-200, continuing with default permissions', {
-              status: res.status,
-            });
+            console.debug(
+              '[Sidebar] Permissions API returned non-200, continuing with default permissions',
+              { status: res.status }
+            );
           }
         }
       } catch (fetchError: any) {
         clearTimeout(timeoutId);
-        if (fetchError.name !== 'AbortError') {
+
+        if (fetchError?.name !== 'AbortError') {
           // Only log non-timeout errors in dev
           if (typeof window !== 'undefined' && window.location.hostname === 'localhost') {
             console.debug('[Sidebar] Permissions check error (non-fatal):', fetchError);
@@ -94,10 +100,19 @@ export default function Sidebar() {
   };
 
   // Filter menu items based on permissions
-  const visibleMenuItems = menuItems.filter(item => {
+  const visibleMenuItems = menuItems.filter((item) => {
     if (!item.permission) return true; // No permission required
     return userPermissions.has(item.permission);
   });
+
+  // Active route helper:
+  // - exact match for /dashboard
+  // - prefix match for other sections (so /inventory/* stays highlighted)
+  const isActiveRoute = (href: string) => {
+    if (!pathname) return false;
+    if (href === '/dashboard') return pathname === '/dashboard';
+    return pathname === href || pathname.startsWith(`${href}/`);
+  };
 
   return (
     <div className="w-64 bg-gray-900 min-h-screen flex flex-col">
@@ -127,14 +142,14 @@ export default function Sidebar() {
         ) : (
           visibleMenuItems.map((item) => {
             const Icon = item.icon;
-            const isActive = pathname === item.href;
-            
+            const active = isActiveRoute(item.href);
+
             return (
               <Link
                 key={item.href}
                 href={item.href}
                 className={`flex items-center space-x-3 px-4 py-3 rounded-lg transition-colors ${
-                  isActive
+                  active
                     ? 'bg-teal-500 text-white'
                     : 'text-gray-300 hover:bg-gray-800 hover:text-white'
                 }`}
@@ -149,13 +164,12 @@ export default function Sidebar() {
 
       {/* Keyboard Shortcuts Help Button */}
       <div className="p-4 border-t border-gray-800">
-        <ShortcutsHelpButton 
-          variant="ghost" 
-          size="sm" 
+        <ShortcutsHelpButton
+          variant="ghost"
+          size="sm"
           className="w-full justify-start text-gray-300 hover:text-white hover:bg-gray-800"
         />
       </div>
     </div>
   );
 }
-

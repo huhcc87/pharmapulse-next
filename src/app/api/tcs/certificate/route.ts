@@ -1,3 +1,4 @@
+// src/app/api/tcs/certificate/route.ts
 // TCS Certificate Generation API
 // POST /api/tcs/certificate - Generate TCS certificate (Form 27D)
 
@@ -5,15 +6,34 @@ import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, requireAuth } from "@/lib/auth";
 import { generateTCSCertificate } from "@/lib/gst/tcs-certificate";
 
+const DEMO_TENANT_ID = 1;
+
+function toInt(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  const n =
+    typeof value === "string" && value.trim() !== ""
+      ? Number(value)
+      : Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function resolveTenantId(user: any): number {
+  return toInt(user?.tenantId) ?? DEMO_TENANT_ID;
+}
+
 export async function POST(req: NextRequest) {
   try {
     const user = await getSessionUser();
     requireAuth(user);
 
-    const body = await req.json();
-    const { customerId, financialYear, quarter } = body;
+    const tenantId = resolveTenantId(user);
 
-    if (!customerId) {
+    const body = await req.json();
+    const { customerId, financialYear, quarter } = body ?? {};
+
+    const customerIdNum = toInt(customerId);
+
+    if (!customerIdNum) {
       return NextResponse.json(
         { error: "customerId is required" },
         { status: 400 }
@@ -34,12 +54,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Generate TCS certificate
     const result = await generateTCSCertificate({
-      customerId: parseInt(customerId),
+      customerId: customerIdNum,
       financialYear,
       quarter,
-      tenantId: user.tenantId || 1,
+      tenantId, // ✅ always number now
     });
 
     if (!result.success) {
@@ -58,7 +77,7 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error("TCS certificate API error:", error);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { error: error?.message || "Internal server error" },
       { status: 500 }
     );
   }

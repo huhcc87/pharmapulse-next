@@ -1,6 +1,6 @@
 /**
  * Licence Validation at Login
- * 
+ *
  * Validates licence status, device fingerprint, and IP address
  * before allowing user to log in.
  */
@@ -9,7 +9,11 @@ import { prisma } from "@/lib/prisma";
 import { getDaysRemaining } from "./licence-utils";
 import { checkGracePeriod } from "./grace-period";
 import { determineAccessLevel, AccessLevel } from "./read-only-mode";
-import { isRateLimited, recordValidationFailure, clearRateLimit } from "./rate-limit";
+import {
+  isRateLimited,
+  recordValidationFailure,
+  clearRateLimit,
+} from "./rate-limit";
 
 export interface LicenceValidationContext {
   tenantId: string;
@@ -34,7 +38,7 @@ export interface LicenceValidationResult {
 
 /**
  * Validate licence at login time
- * 
+ *
  * Checks:
  * 1. Licence exists and is active (not expired)
  * 2. If device fingerprint is registered, it must match
@@ -43,7 +47,17 @@ export interface LicenceValidationResult {
 export async function validateLicenceAtLogin(
   context: LicenceValidationContext
 ): Promise<LicenceValidationResult> {
-  const { tenantId, deviceId, deviceFingerprint, ipAddress } = context;
+  // ✅ FIX: include userAgent from context (it was referenced but not defined)
+  const {
+    tenantId,
+    deviceId,
+    deviceFingerprint,
+    ipAddress,
+    userAgent,
+  } = context;
+
+  // Normalize userAgent defensively (keeps types stable)
+  const safeUserAgent = userAgent || "unknown";
 
   // Check rate limiting (based on IP + device combination)
   const rateLimitKey = `${ipAddress}:${deviceId}`;
@@ -70,16 +84,23 @@ export async function validateLicenceAtLogin(
     };
   }
 
-  const now = new Date();
-
   // Check grace period
   const graceStatus = await checkGracePeriod(licence);
-  
+
   // Check status first
   if (licence.status === "suspended") {
     // Track violation
-    await trackViolation(tenantId, licence.id, "SUSPENDED", "Licence has been suspended", ipAddress, deviceId, deviceFingerprint, userAgent);
-    
+    await trackViolation(
+      tenantId,
+      licence.id,
+      "SUSPENDED",
+      "Licence has been suspended",
+      ipAddress,
+      deviceId,
+      deviceFingerprint,
+      safeUserAgent
+    );
+
     return {
       allowed: false,
       reason: "Licence has been suspended. Please contact support.",
@@ -99,7 +120,10 @@ export async function validateLicenceAtLogin(
   );
 
   // Update last validated time (only if allowed)
-  if (accessLevel.accessLevel === AccessLevel.FULL || accessLevel.accessLevel === AccessLevel.READ_ONLY) {
+  if (
+    accessLevel.accessLevel === AccessLevel.FULL ||
+    accessLevel.accessLevel === AccessLevel.READ_ONLY
+  ) {
     await prisma.license.update({
       where: { id: licence.id },
       data: {
@@ -111,10 +135,17 @@ export async function validateLicenceAtLogin(
 
   // Check if expired (outside grace)
   if (graceStatus.expired && !graceStatus.inGrace) {
-    // Track violation
-    await trackViolation(tenantId, licence.id, "EXPIRED", "Licence has expired", ipAddress, deviceId, deviceFingerprint, userAgent);
-    
-    // Allow read-only access
+    await trackViolation(
+      tenantId,
+      licence.id,
+      "EXPIRED",
+      "Licence has expired",
+      ipAddress,
+      deviceId,
+      deviceFingerprint,
+      safeUserAgent
+    );
+
     return {
       allowed: true, // Allow login but in read-only mode
       reason: accessLevel.reason || "Licence has expired. Read-only access only.",
@@ -131,7 +162,9 @@ export async function validateLicenceAtLogin(
     // In grace period - allow with warning
     return {
       allowed: true,
-      reason: accessLevel.reason || `Licence expired. In grace period (${graceStatus.daysInGrace} days remaining).`,
+      reason:
+        accessLevel.reason ||
+        `Licence expired. In grace period (${graceStatus.daysInGrace} days remaining).`,
       licenceId: licence.id,
       status: licence.status,
       expiresAt: licence.expiresAt,
@@ -142,7 +175,6 @@ export async function validateLicenceAtLogin(
   }
 
   if (licence.status === "pending_renewal") {
-    // Allow read-only access
     return {
       allowed: true,
       reason: "Licence is pending renewal. Read-only access only.",
@@ -157,15 +189,23 @@ export async function validateLicenceAtLogin(
   // If device fingerprint is registered, it must match
   if (licence.registeredDeviceFingerprint) {
     if (licence.registeredDeviceFingerprint !== deviceFingerprint) {
-      // Record rate limit failure
       recordValidationFailure(rateLimitKey);
-      
-      // Track violation
-      await trackViolation(tenantId, licence.id, "DEVICE_MISMATCH", "Device fingerprint does not match registered device", ipAddress, deviceId, deviceFingerprint, userAgent);
-      
+
+      await trackViolation(
+        tenantId,
+        licence.id,
+        "DEVICE_MISMATCH",
+        "Device fingerprint does not match registered device",
+        ipAddress,
+        deviceId,
+        deviceFingerprint,
+        safeUserAgent
+      );
+
       return {
         allowed: false,
-        reason: "Device mismatch. This device is not registered for this licence. Please use your registered device or register this device in Settings.",
+        reason:
+          "Device mismatch. This device is not registered for this licence. Please use your registered device or register this device in Settings.",
         licenceId: licence.id,
         status: licence.status,
         accessLevel: AccessLevel.BLOCKED,
@@ -178,12 +218,19 @@ export async function validateLicenceAtLogin(
   const registeredIP = licence.registeredIp || licence.allowedIp;
   if (registeredIP) {
     if (registeredIP !== ipAddress) {
-      // Record rate limit failure
       recordValidationFailure(rateLimitKey);
-      
-      // Track violation
-      await trackViolation(tenantId, licence.id, "IP_MISMATCH", `IP address mismatch. Current: ${ipAddress}, Expected: ${registeredIP}`, ipAddress, deviceId, deviceFingerprint, userAgent);
-      
+
+      await trackViolation(
+        tenantId,
+        licence.id,
+        "IP_MISMATCH",
+        `IP address mismatch. Current: ${ipAddress}, Expected: ${registeredIP}`,
+        ipAddress,
+        deviceId,
+        deviceFingerprint,
+        safeUserAgent
+      );
+
       return {
         allowed: false,
         reason: `IP address mismatch. Your current IP (${ipAddress}) does not match the registered IP (${registeredIP}). Please use your registered IP or update it in Settings.`,
@@ -197,7 +244,7 @@ export async function validateLicenceAtLogin(
 
   // All checks passed - clear rate limit
   clearRateLimit(rateLimitKey);
-  
+
   return {
     allowed: true,
     licenceId: licence.id,
@@ -223,7 +270,6 @@ async function trackViolation(
   userAgent: string
 ): Promise<void> {
   try {
-    // Create violation record
     await prisma.licenseViolation.create({
       data: {
         tenantId,
@@ -237,7 +283,6 @@ async function trackViolation(
       },
     });
 
-    // Update licence violation count
     await prisma.license.update({
       where: { id: licenceId },
       data: {
@@ -247,6 +292,5 @@ async function trackViolation(
     });
   } catch (error) {
     console.error("Failed to track violation:", error);
-    // Don't throw - violation tracking shouldn't block login
   }
 }

@@ -1,12 +1,41 @@
+// src/lib/pwa/background-sync.ts
 // PWA Background Sync
 // Handles background data synchronization when connection is restored
 
 export interface SyncTask {
   id: string;
-  type: 'invoice' | 'inventory' | 'prescription' | 'payment' | 'stock';
+  type: "invoice" | "inventory" | "prescription" | "payment" | "stock";
   data: any;
   timestamp: Date;
   retries: number;
+}
+
+type StoredSyncTask = Omit<SyncTask, "timestamp"> & {
+  timestamp: Date | string | number;
+};
+
+function idbRequestToPromise<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function idbTransactionDone(tx: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+
+function normalizeTimestamp(ts: StoredSyncTask["timestamp"]): Date {
+  // IndexedDB can store Date objects (structured clone), but be defensive:
+  if (ts instanceof Date) return ts;
+  if (typeof ts === "number") return new Date(ts);
+  // string
+  const d = new Date(ts);
+  return isNaN(d.getTime()) ? new Date() : d;
 }
 
 export class BackgroundSyncManager {
@@ -15,30 +44,30 @@ export class BackgroundSyncManager {
   private syncHandlers: Map<string, (task: SyncTask) => Promise<void>> = new Map();
 
   constructor() {
-    if (typeof window !== 'undefined') {
+    if (typeof window !== "undefined") {
       this.setupEventListeners();
-      this.loadSyncQueue();
+      // Fire-and-forget load; queue will be populated shortly after init
+      void this.loadSyncQueue();
     }
   }
 
   private setupEventListeners() {
     // Online/offline detection
-    window.addEventListener('online', () => {
+    window.addEventListener("online", () => {
       this.isOnline = true;
-      this.processSyncQueue();
+      void this.processSyncQueue();
     });
 
-    window.addEventListener('offline', () => {
+    window.addEventListener("offline", () => {
       this.isOnline = false;
     });
 
-    // Service worker sync event
-    if ('serviceWorker' in navigator) {
+    // Service worker sync event (best-effort; many setups don't emit "sync" here)
+    if ("serviceWorker" in navigator) {
       navigator.serviceWorker.ready.then((registration) => {
-        // Listen for sync events from service worker
-        (registration as any).addEventListener('sync', (event: any) => {
-          if (event.tag === 'background-sync') {
-            this.processSyncQueue();
+        (registration as any).addEventListener?.("sync", (event: any) => {
+          if (event?.tag === "background-sync") {
+            void this.processSyncQueue();
           }
         });
       });
@@ -48,17 +77,22 @@ export class BackgroundSyncManager {
   /**
    * Register sync handler for a task type
    */
-  registerHandler(type: SyncTask['type'], handler: (task: SyncTask) => Promise<void>) {
+  registerHandler(
+    type: SyncTask["type"],
+    handler: (task: SyncTask) => Promise<void>
+  ) {
     this.syncHandlers.set(type, handler);
   }
 
   /**
    * Add task to sync queue
    */
-  async addToQueue(task: Omit<SyncTask, 'id' | 'timestamp' | 'retries'>): Promise<string> {
+  async addToQueue(
+    task: Omit<SyncTask, "id" | "timestamp" | "retries">
+  ): Promise<string> {
     const syncTask: SyncTask = {
       ...task,
-      id: `sync-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
+      id: `sync-${Date.now()}-${Math.random().toString(36).slice(2, 11)}`,
       timestamp: new Date(),
       retries: 0,
     };
@@ -66,11 +100,9 @@ export class BackgroundSyncManager {
     this.syncQueue.push(syncTask);
     await this.saveSyncQueue();
 
-    // Try to sync immediately if online
     if (this.isOnline) {
       await this.processSyncQueue();
     } else {
-      // Request background sync from service worker
       await this.requestBackgroundSync();
     }
 
@@ -81,9 +113,7 @@ export class BackgroundSyncManager {
    * Process sync queue
    */
   private async processSyncQueue(): Promise<void> {
-    if (!this.isOnline || this.syncQueue.length === 0) {
-      return;
-    }
+    if (!this.isOnline || this.syncQueue.length === 0) return;
 
     const tasksToProcess = [...this.syncQueue];
     this.syncQueue = [];
@@ -93,21 +123,18 @@ export class BackgroundSyncManager {
         const handler = this.syncHandlers.get(task.type);
         if (handler) {
           await handler(task);
-          // Remove from queue on success
           await this.removeFromQueue(task.id);
         } else {
-          // No handler, keep in queue
+          // No handler registered; keep it queued
           this.syncQueue.push(task);
         }
       } catch (error) {
         console.error(`Error syncing task ${task.id}:`, error);
         task.retries++;
-        
-        // Retry up to 3 times
+
         if (task.retries < 3) {
           this.syncQueue.push(task);
         } else {
-          // Max retries reached, remove from queue
           console.error(`Task ${task.id} failed after ${task.retries} retries`);
           await this.removeFromQueue(task.id);
         }
@@ -121,12 +148,15 @@ export class BackgroundSyncManager {
    * Request background sync from service worker
    */
   private async requestBackgroundSync(): Promise<void> {
-    if ('serviceWorker' in navigator && 'sync' in (ServiceWorkerRegistration.prototype as any)) {
+    if (
+      "serviceWorker" in navigator &&
+      "sync" in (ServiceWorkerRegistration.prototype as any)
+    ) {
       try {
         const registration = await navigator.serviceWorker.ready;
-        await (registration as any).sync.register('background-sync');
+        await (registration as any).sync.register("background-sync");
       } catch (error) {
-        console.error('Error registering background sync:', error);
+        console.error("Error registering background sync:", error);
       }
     }
   }
@@ -152,40 +182,39 @@ export class BackgroundSyncManager {
 
     for (const task of this.syncQueue) {
       byType[task.type] = (byType[task.type] || 0) + 1;
-      if (!oldestTask || task.timestamp < oldestTask) {
-        oldestTask = task.timestamp;
-      }
+      if (!oldestTask || task.timestamp < oldestTask) oldestTask = task.timestamp;
     }
 
-    return {
-      total: this.syncQueue.length,
-      byType,
-      oldestTask,
-    };
+    return { total: this.syncQueue.length, byType, oldestTask };
   }
 
   /**
    * Save sync queue to IndexedDB
    */
   private async saveSyncQueue(): Promise<void> {
-    if (typeof window === 'undefined' || !('indexedDB' in window)) {
-      return;
-    }
+    if (typeof window === "undefined" || !("indexedDB" in window)) return;
 
     try {
       const db = await this.openDB();
-      const tx = db.transaction(['syncQueue'], 'readwrite');
-      const store = tx.objectStore('syncQueue');
-      
+      const tx = db.transaction(["syncQueue"], "readwrite");
+      const store = tx.objectStore("syncQueue");
+
       // Clear existing
-      await store.clear();
-      
-      // Add all tasks
+      await idbRequestToPromise(store.clear());
+
+      // Put all tasks (put overwrites if key exists; safer than add)
       for (const task of this.syncQueue) {
-        await store.add(task);
+        const toStore: StoredSyncTask = {
+          ...task,
+          // Store Date as Date (structured clone supported). Keep explicit:
+          timestamp: task.timestamp,
+        };
+        await idbRequestToPromise(store.put(toStore));
       }
+
+      await idbTransactionDone(tx);
     } catch (error) {
-      console.error('Error saving sync queue:', error);
+      console.error("Error saving sync queue:", error);
     }
   }
 
@@ -193,22 +222,25 @@ export class BackgroundSyncManager {
    * Load sync queue from IndexedDB
    */
   private async loadSyncQueue(): Promise<void> {
-    if (typeof window === 'undefined' || !('indexedDB' in window)) {
-      return;
-    }
+    if (typeof window === "undefined" || !("indexedDB" in window)) return;
 
     try {
       const db = await this.openDB();
-      const tx = db.transaction(['syncQueue'], 'readonly');
-      const store = tx.objectStore('syncQueue');
-      const allTasks = await store.getAll();
-      
-      this.syncQueue = allTasks.map((task) => ({
+      const tx = db.transaction(["syncQueue"], "readonly");
+      const store = tx.objectStore("syncQueue");
+
+      const allTasks = await idbRequestToPromise<StoredSyncTask[]>(
+        store.getAll()
+      );
+
+      await idbTransactionDone(tx);
+
+      this.syncQueue = (allTasks || []).map((task) => ({
         ...task,
-        timestamp: new Date(task.timestamp),
+        timestamp: normalizeTimestamp(task.timestamp),
       }));
     } catch (error) {
-      console.error('Error loading sync queue:', error);
+      console.error("Error loading sync queue:", error);
     }
   }
 
@@ -217,17 +249,17 @@ export class BackgroundSyncManager {
    */
   private async openDB(): Promise<IDBDatabase> {
     return new Promise((resolve, reject) => {
-      const request = indexedDB.open('pharmapulse-sync', 1);
+      const request = indexedDB.open("pharmapulse-sync", 1);
 
       request.onerror = () => reject(request.error);
       request.onsuccess = () => resolve(request.result);
 
       request.onupgradeneeded = (event) => {
         const db = (event.target as IDBOpenDBRequest).result;
-        if (!db.objectStoreNames.contains('syncQueue')) {
-          const store = db.createObjectStore('syncQueue', { keyPath: 'id' });
-          store.createIndex('type', 'type', { unique: false });
-          store.createIndex('timestamp', 'timestamp', { unique: false });
+        if (!db.objectStoreNames.contains("syncQueue")) {
+          const store = db.createObjectStore("syncQueue", { keyPath: "id" });
+          store.createIndex("type", "type", { unique: false });
+          store.createIndex("timestamp", "timestamp", { unique: false });
         }
       };
     });
@@ -238,8 +270,6 @@ export class BackgroundSyncManager {
 let backgroundSyncInstance: BackgroundSyncManager | null = null;
 
 export function getBackgroundSyncManager(): BackgroundSyncManager {
-  if (!backgroundSyncInstance) {
-    backgroundSyncInstance = new BackgroundSyncManager();
-  }
+  if (!backgroundSyncInstance) backgroundSyncInstance = new BackgroundSyncManager();
   return backgroundSyncInstance;
 }

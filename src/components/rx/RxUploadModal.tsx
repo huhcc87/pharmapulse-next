@@ -17,8 +17,6 @@ interface ParsedLine {
   confidence: number;
 }
 
-import CartBuilderModal from "./CartBuilderModal";
-
 interface RxUploadModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -74,11 +72,9 @@ export default function RxUploadModal({
       setParsed(data.parsed);
 
       if (data.needsReview) {
-        setError(
-          "Low confidence parsing detected. Please review and confirm each medication."
-        );
+        setError("Low confidence parsing detected. Please review and confirm each medication.");
       }
-      
+
       // Auto-open cart builder if parsing successful
       if (data.parsed && data.parsed.lines && data.parsed.lines.length > 0) {
         setShowCartBuilder(true);
@@ -129,17 +125,9 @@ export default function RxUploadModal({
               {!file ? (
                 <div>
                   <Upload className="w-12 h-12 text-gray-400 mx-auto mb-4" />
-                  <p className="text-sm text-gray-600 mb-2">
-                    Click to select or drag and drop
-                  </p>
-                  <p className="text-xs text-gray-500">
-                    Supported: JPEG, PNG, PDF (max 10MB)
-                  </p>
-                  <Button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="mt-4"
-                  >
+                  <p className="text-sm text-gray-600 mb-2">Click to select or drag and drop</p>
+                  <p className="text-xs text-gray-500">Supported: JPEG, PNG, PDF (max 10MB)</p>
+                  <Button type="button" onClick={() => fileInputRef.current?.click()} className="mt-4">
                     Select File
                   </Button>
                 </div>
@@ -147,9 +135,7 @@ export default function RxUploadModal({
                 <div>
                   <FileText className="w-12 h-12 text-blue-500 mx-auto mb-4" />
                   <p className="text-sm font-medium">{file.name}</p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    {(file.size / 1024 / 1024).toFixed(2)} MB
-                  </p>
+                  <p className="text-xs text-gray-500 mt-1">{(file.size / 1024 / 1024).toFixed(2)} MB</p>
                   <Button
                     type="button"
                     variant="outline"
@@ -176,11 +162,7 @@ export default function RxUploadModal({
 
           {/* Parse Button */}
           {file && !parsed && (
-            <Button
-              onClick={handleUpload}
-              disabled={isUploading}
-              className="w-full"
-            >
+            <Button onClick={handleUpload} disabled={isUploading} className="w-full">
               {isUploading ? (
                 <>
                   <Loader2 className="w-4 h-4 mr-2 animate-spin" />
@@ -201,8 +183,7 @@ export default function RxUploadModal({
               <div className="p-3 bg-green-50 border border-green-200 rounded-lg flex items-center gap-2">
                 <CheckCircle2 className="w-5 h-5 text-green-600" />
                 <p className="text-sm text-green-800">
-                  Prescription parsed successfully (Confidence:{" "}
-                  {(parsed.confidence * 100).toFixed(0)}%)
+                  Prescription parsed successfully (Confidence: {(parsed.confidence * 100).toFixed(0)}%)
                 </p>
               </div>
 
@@ -237,9 +218,7 @@ export default function RxUploadModal({
                   <div
                     key={idx}
                     className={`p-3 rounded-lg border-2 ${
-                      line.confidence < 0.5
-                        ? "border-yellow-300 bg-yellow-50"
-                        : "border-gray-200 bg-white"
+                      line.confidence < 0.5 ? "border-yellow-300 bg-yellow-50" : "border-gray-200 bg-white"
                     }`}
                   >
                     <div className="flex items-start justify-between mb-2">
@@ -288,10 +267,7 @@ export default function RxUploadModal({
                 <Button variant="outline" onClick={onClose} className="flex-1">
                   Cancel
                 </Button>
-                <Button
-                  onClick={() => setShowCartBuilder(true)}
-                  className="flex-1"
-                >
+                <Button onClick={() => setShowCartBuilder(true)} className="flex-1">
                   Map to Drug Library
                 </Button>
               </div>

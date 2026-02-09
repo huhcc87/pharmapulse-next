@@ -38,7 +38,7 @@ export async function extractPrescriptionText(
   input: PrescriptionOCRInput
 ): Promise<PrescriptionOCRResult> {
   const provider = input.provider || process.env.OCR_PROVIDER || "google";
-  
+
   try {
     let text = "";
     let confidence = 0;
@@ -111,12 +111,14 @@ async function extractWithGoogleVision(
   if (!API_KEY) {
     console.warn("Google Vision API key not configured. Returning mock OCR.");
     return {
-      text: "MOCK PRESCRIPTION TEXT\nCrocin 500mg - 1-0-1 - 5 days\nParacetamol 500mg - 0-0-1 - 3 days",
+      text:
+        "MOCK PRESCRIPTION TEXT\nCrocin 500mg - 1-0-1 - 5 days\nParacetamol 500mg - 0-0-1 - 3 days",
       confidence: 85,
     };
   }
 
-  const imageData = input.imageBase64 || await fetchImageAsBase64(input.imageUrl);
+  const imageData =
+    input.imageBase64 || (await fetchImageAsBase64(input.imageUrl));
 
   const response = await fetch(API_URL, {
     method: "POST",
@@ -159,10 +161,8 @@ async function extractWithGoogleVision(
  * Extract text using AWS Textract
  */
 async function extractWithAWSTextract(
-  input: PrescriptionOCRInput
+  _input: PrescriptionOCRInput
 ): Promise<{ text: string; confidence: number }> {
-  // AWS Textract requires AWS SDK
-  // For now, return mock implementation
   console.warn("AWS Textract not fully implemented. Returning mock OCR.");
   return {
     text: "MOCK PRESCRIPTION TEXT\nCrocin 500mg - 1-0-1 - 5 days",
@@ -174,10 +174,8 @@ async function extractWithAWSTextract(
  * Extract text using Tesseract (local/self-hosted)
  */
 async function extractWithTesseract(
-  input: PrescriptionOCRInput
+  _input: PrescriptionOCRInput
 ): Promise<{ text: string; confidence: number }> {
-  // Tesseract requires local installation or API endpoint
-  // For now, return mock implementation
   console.warn("Tesseract OCR not fully implemented. Returning mock OCR.");
   return {
     text: "MOCK PRESCRIPTION TEXT\nCrocin 500mg - 1-0-1 - 5 days",
@@ -194,23 +192,23 @@ async function fetchImageAsBase64(imageUrl: string): Promise<string> {
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
     return buffer.toString("base64");
-  } catch (error) {
+  } catch {
     throw new Error("Failed to fetch image");
   }
 }
 
 /**
  * Parse drugs from extracted text
- * Uses pattern matching and AI to identify medication names
  */
-async function parseDrugsFromText(text: string): Promise<PrescriptionOCRResult["extractedDrugs"]> {
-  const lines = text.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
-  const drugs: PrescriptionOCRResult["extractedDrugs"] = [];
+async function parseDrugsFromText(
+  text: string
+): Promise<PrescriptionOCRResult["extractedDrugs"]> {
+  const lines = text
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 
-  // Common patterns for prescriptions:
-  // "Crocin 500mg - 1-0-1 - 5 days"
-  // "Paracetamol 500mg - BD - 3 days"
-  // "Azithromycin 500mg - Once daily - 7 days"
+  const drugs: PrescriptionOCRResult["extractedDrugs"] = [];
 
   for (const line of lines) {
     // Skip header lines (Doctor name, date, etc.)
@@ -224,35 +222,39 @@ async function parseDrugsFromText(text: string): Promise<PrescriptionOCRResult["
     }
 
     // Pattern: DrugName Dosage - Frequency - Duration
-    const drugMatch = line.match(/^([A-Za-z\s]+(?:\s+\d+[mg|ml|IU]+)?)\s*[-–]\s*(.+)/);
-    if (drugMatch) {
-      const medicationName = drugMatch[1].trim();
-      const rest = drugMatch[2].trim();
+    const drugMatch = line.match(
+      /^([A-Za-z\s]+(?:\s+\d+(?:mg|ml|iu|mcg|g))?)\s*[-–]\s*(.+)/i
+    );
 
-      // Parse frequency (1-0-1, BD, TDS, etc.)
-      const frequency = extractFrequency(rest);
+    if (!drugMatch) continue;
 
-      // Parse duration (5 days, 1 week, etc.)
-      const duration = extractDuration(rest);
+    const medicationNameRaw = drugMatch[1].trim();
+    const rest = drugMatch[2].trim();
 
-      // Parse quantity (if mentioned)
-      const quantity = extractQuantity(rest) || 1;
+    const frequency = extractFrequency(rest);
+    const duration = extractDuration(rest);
+    const quantity = extractQuantity(rest) || 1;
 
-      // Parse dosage (if separate)
-      const dosage = extractDosage(medicationName);
+    // Dosage can be in the left part (e.g., "Crocin 500mg") or elsewhere
+    const parsedDosage =
+      extractDosage(medicationNameRaw) || extractDosage(rest);
 
-      // Try to match with drug library
-      const matchedDrug = await matchDrugInLibrary(medicationName);
+    // Try to match with drug library
+    const matchedDrug = await matchDrugInLibrary(medicationNameRaw);
 
-      drugs.push({
-        medicationName: matchedDrug?.brandName || medicationName,
-        dosage: matchedDrug?.dosage || dosage,
-        frequency,
-        duration,
-        quantity,
-        confidence: 70, // Default confidence, can be improved with AI
-      });
-    }
+    // Prefer library brandName if found; dosage comes from parsing (NOT from DB field)
+    const finalName = matchedDrug?.brandName || medicationNameRaw;
+    const finalDosage =
+      parsedDosage || extractDosage(finalName) || undefined;
+
+    drugs.push({
+      medicationName: finalName,
+      dosage: finalDosage,
+      frequency,
+      duration,
+      quantity,
+      confidence: 70,
+    });
   }
 
   return drugs;
@@ -262,7 +264,7 @@ async function parseDrugsFromText(text: string): Promise<PrescriptionOCRResult["
  * Extract frequency from text (1-0-1, BD, TDS, etc.)
  */
 function extractFrequency(text: string): string | undefined {
-  const patterns = {
+  const patterns: Record<string, string> = {
     "1-0-1": "Morning-Night",
     "1-1-1": "Three times a day",
     "0-0-1": "Night only",
@@ -273,17 +275,13 @@ function extractFrequency(text: string): string | undefined {
     SOS: "As needed",
   };
 
+  const upper = text.toUpperCase();
   for (const [pattern, frequency] of Object.entries(patterns)) {
-    if (text.toUpperCase().includes(pattern)) {
-      return frequency;
-    }
+    if (upper.includes(pattern)) return frequency;
   }
 
-  // Try to extract custom frequency
   const freqMatch = text.match(/(\d+)\s*times?\s*(daily|day|week)/i);
-  if (freqMatch) {
-    return `${freqMatch[1]} times ${freqMatch[2]}`;
-  }
+  if (freqMatch) return `${freqMatch[1]} times ${freqMatch[2]}`;
 
   return undefined;
 }
@@ -292,10 +290,10 @@ function extractFrequency(text: string): string | undefined {
  * Extract duration from text (5 days, 1 week, etc.)
  */
 function extractDuration(text: string): string | undefined {
-  const durationMatch = text.match(/(\d+)\s*(day|days|week|weeks|month|months)/i);
-  if (durationMatch) {
-    return `${durationMatch[1]} ${durationMatch[2]}`;
-  }
+  const durationMatch = text.match(
+    /(\d+)\s*(day|days|week|weeks|month|months)/i
+  );
+  if (durationMatch) return `${durationMatch[1]} ${durationMatch[2]}`;
   return undefined;
 }
 
@@ -304,20 +302,17 @@ function extractDuration(text: string): string | undefined {
  */
 function extractQuantity(text: string): number | undefined {
   const qtyMatch = text.match(/(?:qty|quantity|no\.|nos?):?\s*(\d+)/i);
-  if (qtyMatch) {
-    return parseInt(qtyMatch[1]);
-  }
+  if (qtyMatch) return parseInt(qtyMatch[1], 10);
   return undefined;
 }
 
 /**
- * Extract dosage from medication name
+ * Extract dosage from a string
  */
-function extractDosage(medicationName: string): string | undefined {
-  const dosageMatch = medicationName.match(/(\d+[mg|ml|IU|mcg|g]+)/i);
-  if (dosageMatch) {
-    return dosageMatch[1];
-  }
+function extractDosage(input: string): string | undefined {
+  // Examples: 500mg, 5 ml, 10IU, 250 mcg, 1g
+  const m = input.match(/\b(\d+(?:\.\d+)?\s*(?:mg|ml|iu|mcg|g))\b/i);
+  if (m) return m[1].replace(/\s+/g, "");
   return undefined;
 }
 
@@ -327,17 +322,15 @@ function extractDosage(medicationName: string): string | undefined {
 function extractDoctorInfo(text: string): { name?: string; license?: string } {
   const info: { name?: string; license?: string } = {};
 
-  // Doctor name pattern: "Dr. Name" or "Doctor: Name"
-  const doctorMatch = text.match(/(?:Dr\.|Doctor|DR\.)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/);
-  if (doctorMatch) {
-    info.name = doctorMatch[1].trim();
-  }
+  const doctorMatch = text.match(
+    /(?:Dr\.|Doctor|DR\.)\s*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/
+  );
+  if (doctorMatch) info.name = doctorMatch[1].trim();
 
-  // License pattern: "License: XXX" or "Reg. No.: XXX"
-  const licenseMatch = text.match(/(?:License|Reg\.?\s*No\.?|Registration):\s*([A-Z0-9]+)/i);
-  if (licenseMatch) {
-    info.license = licenseMatch[1].trim();
-  }
+  const licenseMatch = text.match(
+    /(?:License|Reg\.?\s*No\.?|Registration):\s*([A-Z0-9]+)/i
+  );
+  if (licenseMatch) info.license = licenseMatch[1].trim();
 
   return info;
 }
@@ -346,7 +339,6 @@ function extractDoctorInfo(text: string): { name?: string; license?: string } {
  * Extract date from text
  */
 function extractDate(text: string): Date | undefined {
-  // Date patterns: "Date: DD/MM/YYYY", "DD-MM-YYYY", etc.
   const datePatterns = [
     /(?:Date|Dated?):\s*(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/i,
     /(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/,
@@ -355,39 +347,40 @@ function extractDate(text: string): Date | undefined {
   for (const pattern of datePatterns) {
     const match = text.match(pattern);
     if (match) {
-      const day = parseInt(match[1]);
-      const month = parseInt(match[2]) - 1; // JS months are 0-indexed
-      const year = parseInt(match[3]);
+      const day = parseInt(match[1], 10);
+      const month = parseInt(match[2], 10) - 1;
+      const year = parseInt(match[3], 10);
       return new Date(year, month, day);
     }
   }
-
   return undefined;
 }
 
 /**
  * Match extracted drug name with drug library
+ *
+ * IMPORTANT:
+ * Your Prisma drugLibrary type does NOT have a 'dosage' field (per TS error),
+ * so we only return 'brandName' from DB and infer dosage from the text.
  */
 async function matchDrugInLibrary(
   medicationName: string
-): Promise<{ brandName: string; dosage?: string } | null> {
+): Promise<{ brandName: string } | null> {
   try {
-    // Search in drug library
+    const token = medicationName.split(" ")[0] || medicationName;
+
     const drug = await prisma.drugLibrary.findFirst({
       where: {
         OR: [
           { brandName: { contains: medicationName, mode: "insensitive" } },
-          { brandName: { contains: medicationName.split(" ")[0], mode: "insensitive" } },
+          { brandName: { contains: token, mode: "insensitive" } },
         ],
       },
       take: 1,
     });
 
     if (drug) {
-      return {
-        brandName: drug.brandName,
-        dosage: drug.dosage || undefined,
-      };
+      return { brandName: drug.brandName };
     }
   } catch (error) {
     console.warn("Failed to match drug in library:", error);

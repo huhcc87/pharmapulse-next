@@ -29,11 +29,13 @@ export default function InsuranceCardCapture({
     insuranceProvider: "",
     expiryDate: "",
   });
+
   const [isUploading, setIsUploading] = useState(false);
   const [eligibilityStatus, setEligibilityStatus] = useState<{
     isEligible: boolean;
     message?: string;
   } | null>(null);
+
   const [isCheckingEligibility, setIsCheckingEligibility] = useState(false);
 
   async function handleFileUpload(event: React.ChangeEvent<HTMLInputElement>) {
@@ -41,8 +43,8 @@ export default function InsuranceCardCapture({
     if (!file) return;
 
     setIsUploading(true);
+
     try {
-      // Upload image to server
       const formData = new FormData();
       formData.append("file", file);
 
@@ -59,11 +61,9 @@ export default function InsuranceCardCapture({
       setCardData((prev) => ({ ...prev, cardImageUrl: data.imageUrl }));
 
       // TODO: OCR extraction of card details
-      // For now, user needs to enter manually
-
       showToast("Card image uploaded successfully", "success");
     } catch (error: any) {
-      showToast(error.message || "Failed to upload card", "error");
+      showToast(error?.message || "Failed to upload card", "error");
     } finally {
       setIsUploading(false);
     }
@@ -76,6 +76,7 @@ export default function InsuranceCardCapture({
     }
 
     setIsCheckingEligibility(true);
+
     try {
       const response = await fetch("/api/insurance/check-eligibility", {
         method: "POST",
@@ -92,18 +93,21 @@ export default function InsuranceCardCapture({
       }
 
       const data = await response.json();
+
       setEligibilityStatus({
-        isEligible: data.isEligible,
+        isEligible: !!data.isEligible,
         message: data.message,
       });
 
       if (data.isEligible) {
         showToast("Insurance eligibility confirmed", "success");
       } else {
-        showToast(data.message || "Insurance not eligible", "warning");
+        // ✅ FIX: showToast does not support "warning" in your typings
+        // Map warning-like messages to "info"
+        showToast(data.message || "Insurance not eligible", "info");
       }
     } catch (error: any) {
-      showToast(error.message || "Failed to check eligibility", "error");
+      showToast(error?.message || "Failed to check eligibility", "error");
     } finally {
       setIsCheckingEligibility(false);
     }
@@ -267,9 +271,7 @@ export default function InsuranceCardCapture({
           )}
           <span className="text-sm font-medium">
             {eligibilityStatus.message ||
-              (eligibilityStatus.isEligible
-                ? "Eligible"
-                : "Not eligible")}
+              (eligibilityStatus.isEligible ? "Eligible" : "Not eligible")}
           </span>
         </div>
       )}

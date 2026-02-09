@@ -1,6 +1,6 @@
 /**
  * Rate Limiting for Licence Validation Failures
- * 
+ *
  * Prevents brute force attacks on licence validation
  */
 
@@ -8,7 +8,7 @@
 const validationFailureStore = new Map<string, { count: number; resetAt: number }>();
 
 const MAX_FAILURES = 5; // Max failures before blocking
-const WINDOW_MINUTES = 15; // Time window in minutes
+const WINDOW_MINUTES = 15; // Time window in minutes (kept for future use)
 const BLOCK_DURATION_MINUTES = 60; // Block duration in minutes
 
 /**
@@ -16,13 +16,11 @@ const BLOCK_DURATION_MINUTES = 60; // Block duration in minutes
  */
 export function isRateLimited(identifier: string): boolean {
   const record = validationFailureStore.get(identifier);
-  
-  if (!record) {
-    return false;
-  }
+
+  if (!record) return false;
 
   const now = Date.now();
-  
+
   // Check if block period has expired
   if (now > record.resetAt) {
     validationFailureStore.delete(identifier);
@@ -30,11 +28,7 @@ export function isRateLimited(identifier: string): boolean {
   }
 
   // Check if exceeded max failures
-  if (record.count >= MAX_FAILURES) {
-    return true;
-  }
-
-  return false;
+  return record.count >= MAX_FAILURES;
 }
 
 /**
@@ -43,19 +37,15 @@ export function isRateLimited(identifier: string): boolean {
 export function recordValidationFailure(identifier: string): void {
   const record = validationFailureStore.get(identifier);
   const now = Date.now();
-  const resetAt = now + (BLOCK_DURATION_MINUTES * 60 * 1000);
+  const resetAt = now + BLOCK_DURATION_MINUTES * 60 * 1000;
 
   if (record) {
-    // Increment count
     record.count += 1;
     record.resetAt = resetAt;
-  } else {
-    // Create new record
-    validationFailureStore.set(identifier, {
-      count: 1,
-      resetAt: resetAt,
-    });
+    return;
   }
+
+  validationFailureStore.set(identifier, { count: 1, resetAt });
 }
 
 /**
@@ -74,13 +64,10 @@ export function getRateLimitStatus(identifier: string): {
   resetAt: Date | null;
 } {
   const record = validationFailureStore.get(identifier);
-  
-  if (!record) {
-    return { blocked: false, failures: 0, resetAt: null };
-  }
+  if (!record) return { blocked: false, failures: 0, resetAt: null };
 
   const now = Date.now();
-  
+
   if (now > record.resetAt) {
     validationFailureStore.delete(identifier);
     return { blocked: false, failures: 0, resetAt: null };
@@ -100,18 +87,19 @@ export function cleanupRateLimitStore(): number {
   const now = Date.now();
   let cleaned = 0;
 
-  for (const [key, record] of validationFailureStore.entries()) {
+  // Avoid iterating MapIterator with for..of for older TS targets
+  validationFailureStore.forEach((record, key) => {
     if (now > record.resetAt) {
       validationFailureStore.delete(key);
       cleaned++;
     }
-  }
+  });
 
   return cleaned;
 }
 
-// Clean up every hour
-if (typeof setInterval !== 'undefined') {
+// Clean up every hour (best-effort; may be a no-op in some serverless runtimes)
+if (typeof setInterval !== "undefined") {
   setInterval(() => {
     cleanupRateLimitStore();
   }, 60 * 60 * 1000); // 1 hour

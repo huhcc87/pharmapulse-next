@@ -1,9 +1,8 @@
+// src/lib/billing/tax-management.ts
 // Tax Management (GST) Advanced
 // GSTR filing integration, tax report generation, HSN management
 
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
 
 export interface GSTRFilingData {
   period: string; // YYYY-MM format
@@ -37,6 +36,55 @@ export interface TaxReportData {
   }>;
 }
 
+function parsePeriod(period: string): { startDate: Date; endDate: Date } {
+  const [y, m] = period.split("-");
+  const year = Number.parseInt(y, 10);
+  const month = Number.parseInt(m, 10); // 1..12
+
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) {
+    throw new Error(`Invalid period format. Expected YYYY-MM, got: ${period}`);
+  }
+
+  // monthIndex: 0..11
+  const monthIndex = month - 1;
+
+  const startDate = new Date(year, monthIndex, 1, 0, 0, 0, 0);
+  // last day of the target month: day=0 of next month
+  const endDate = new Date(year, monthIndex + 1, 0, 23, 59, 59, 999);
+
+  return { startDate, endDate };
+}
+
+function sumInvoiceFromLineItems(lineItems: any[]): {
+  taxableValue: number;
+  cgst: number;
+  sgst: number;
+  igst: number;
+  totalTax: number;
+} {
+  let cgst = 0;
+  let sgst = 0;
+  let igst = 0;
+  let gross = 0;
+
+  for (const li of lineItems ?? []) {
+    const lineTotal = Number(li?.lineTotalPaise ?? 0);
+    const liCgst = Number(li?.cgstPaise ?? 0);
+    const liSgst = Number(li?.sgstPaise ?? 0);
+    const liIgst = Number(li?.igstPaise ?? 0);
+
+    gross += lineTotal;
+    cgst += liCgst;
+    sgst += liSgst;
+    igst += liIgst;
+  }
+
+  const totalTax = cgst + sgst + igst;
+  const taxableValue = gross - totalTax;
+
+  return { taxableValue, cgst, sgst, igst, totalTax };
+}
+
 /**
  * Generate GSTR filing data
  */
@@ -46,16 +94,17 @@ export async function generateGSTRFilingData(
   gstin: string
 ): Promise<GSTRFilingData> {
   try {
-    // Parse period
-    const [year, month] = period.split("-");
-    const startDate = new Date(parseInt(year), parseInt(month) - 1, 1);
-    const endDate = new Date(parseInt(year), parseInt(month), 0, 23, 59, 59);
+    const { startDate, endDate } = parsePeriod(period);
 
-    // Get invoices for the period
+    // NOTE: gstin is being used as sellerGstinId in your original code (numeric).
+    // Keeping same behavior but making it safe.
+    const numericTenantId = Number.parseInt(tenantId, 10);
+    const numericGstinId = Number.parseInt(gstin, 10);
+
     const invoices = await prisma.invoice.findMany({
       where: {
-        tenantId: parseInt(tenantId) || 1,
-        sellerGstinId: parseInt(gstin) || 1,
+        tenantId: Number.isFinite(numericTenantId) ? numericTenantId : 1,
+        ...(Number.isFinite(numericGstinId) ? { sellerGstinId: numericGstinId } : {}),
         invoiceDate: {
           gte: startDate,
           lte: endDate,
@@ -70,22 +119,24 @@ export async function generateGSTRFilingData(
       },
     });
 
-    const filingData: GSTRFilingData = {
+    return {
       period,
       gstin,
-      invoices: invoices.map((inv) => ({
-        invoiceNumber: inv.invoiceNumber || "",
-        invoiceDate: inv.invoiceDate,
-        customerGstin: inv.buyerGstin || undefined,
-        taxableValue: (inv.totalAmountPaise || 0) - (inv.totalCGSTPaise || 0) - (inv.totalSGSTPaise || 0) - (inv.totalIGSTPaise || 0),
-        cgst: inv.totalCGSTPaise || 0,
-        sgst: inv.totalSGSTPaise || 0,
-        igst: inv.totalIGSTPaise || 0,
-        totalTax: (inv.totalCGSTPaise || 0) + (inv.totalSGSTPaise || 0) + (inv.totalIGSTPaise || 0),
-      })),
-    };
+      invoices: invoices.map((inv) => {
+        const totals = sumInvoiceFromLineItems(inv.lineItems as any[]);
 
-    return filingData;
+        return {
+          invoiceNumber: inv.invoiceNumber || "",
+          invoiceDate: inv.invoiceDate,
+          customerGstin: (inv as any).buyerGstin || undefined,
+          taxableValue: totals.taxableValue,
+          cgst: totals.cgst,
+          sgst: totals.sgst,
+          igst: totals.igst,
+          totalTax: totals.totalTax,
+        };
+      }),
+    };
   } catch (error: any) {
     console.error("Generate GSTR filing data error:", error);
     throw error;
@@ -96,7 +147,7 @@ export async function generateGSTRFilingData(
  * Submit GSTR filing (placeholder - would integrate with GST portal)
  */
 export async function submitGSTRFiling(
-  tenantId: string,
+  _tenantId: string,
   filingData: GSTRFilingData
 ): Promise<{
   success: boolean;
@@ -104,13 +155,6 @@ export async function submitGSTRFiling(
   message: string;
 }> {
   try {
-    // In a real implementation, this would:
-    // 1. Format data according to GST portal requirements
-    // 2. Submit to GST portal API
-    // 3. Handle authentication/authorization
-    // 4. Return filing acknowledgment
-
-    // For now, return a placeholder response
     return {
       success: true,
       filingId: `GSTR-${filingData.period}-${Date.now()}`,
@@ -131,27 +175,21 @@ export async function generateTaxReport(
   gstin?: string
 ): Promise<TaxReportData> {
   try {
-    // Parse period
-    const [year, month] = period.split("-");
-    const startDate = new Date(parseInt(year), parseInt(month) - 1, 1);
-    const endDate = new Date(parseInt(year), parseInt(month), 0, 23, 59, 59);
+    const { startDate, endDate } = parsePeriod(period);
+
+    const numericTenantId = Number.parseInt(tenantId, 10);
+    const numericGstinId = gstin ? Number.parseInt(gstin, 10) : NaN;
 
     const where: any = {
-      tenantId: parseInt(tenantId) || 1,
-      invoiceDate: {
-        gte: startDate,
-        lte: endDate,
-      },
-      status: {
-        in: ["ISSUED", "FILED"],
-      },
+      tenantId: Number.isFinite(numericTenantId) ? numericTenantId : 1,
+      invoiceDate: { gte: startDate, lte: endDate },
+      status: { in: ["ISSUED", "FILED"] },
     };
 
-    if (gstin) {
-      where.sellerGstinId = parseInt(gstin);
+    if (gstin && Number.isFinite(numericGstinId)) {
+      where.sellerGstinId = numericGstinId;
     }
 
-    // Get invoices
     const invoices = await prisma.invoice.findMany({
       where,
       include: {
@@ -159,47 +197,44 @@ export async function generateTaxReport(
       },
     });
 
-    // Calculate totals
     let totalTaxableValue = 0;
     let totalCGST = 0;
     let totalSGST = 0;
     let totalIGST = 0;
 
-    // HSN breakdown
-    const hsnBreakdown: Record<string, {
-      taxableValue: number;
-      cgst: number;
-      sgst: number;
-      igst: number;
-    }> = {};
+    const hsnBreakdown: Record<
+      string,
+      { taxableValue: number; cgst: number; sgst: number; igst: number }
+    > = {};
 
     for (const invoice of invoices) {
-      totalTaxableValue += (invoice.totalAmountPaise || 0) - (invoice.totalCGSTPaise || 0) - (invoice.totalSGSTPaise || 0) - (invoice.totalIGSTPaise || 0);
-      totalCGST += invoice.totalCGSTPaise || 0;
-      totalSGST += invoice.totalSGSTPaise || 0;
-      totalIGST += invoice.totalIGSTPaise || 0;
+      const invTotals = sumInvoiceFromLineItems(invoice.lineItems as any[]);
+      totalTaxableValue += invTotals.taxableValue;
+      totalCGST += invTotals.cgst;
+      totalSGST += invTotals.sgst;
+      totalIGST += invTotals.igst;
 
-      // HSN breakdown
-      for (const lineItem of invoice.lineItems) {
-        const hsn = lineItem.hsnCode || "UNKNOWN";
+      for (const lineItem of invoice.lineItems as any[]) {
+        const hsn = String(lineItem?.hsnCode ?? "UNKNOWN");
         if (!hsnBreakdown[hsn]) {
-          hsnBreakdown[hsn] = {
-            taxableValue: 0,
-            cgst: 0,
-            sgst: 0,
-            igst: 0,
-          };
+          hsnBreakdown[hsn] = { taxableValue: 0, cgst: 0, sgst: 0, igst: 0 };
         }
 
-        const lineTaxable = (lineItem.lineTotalPaise || 0) - (lineItem.cgstPaise || 0) - (lineItem.sgstPaise || 0) - (lineItem.igstPaise || 0);
+        const lineTotal = Number(lineItem?.lineTotalPaise ?? 0);
+        const cgst = Number(lineItem?.cgstPaise ?? 0);
+        const sgst = Number(lineItem?.sgstPaise ?? 0);
+        const igst = Number(lineItem?.igstPaise ?? 0);
+
+        const lineTaxable = lineTotal - (cgst + sgst + igst);
+
         hsnBreakdown[hsn].taxableValue += lineTaxable;
-        hsnBreakdown[hsn].cgst += lineItem.cgstPaise || 0;
-        hsnBreakdown[hsn].sgst += lineItem.sgstPaise || 0;
-        hsnBreakdown[hsn].igst += lineItem.igstPaise || 0;
+        hsnBreakdown[hsn].cgst += cgst;
+        hsnBreakdown[hsn].sgst += sgst;
+        hsnBreakdown[hsn].igst += igst;
       }
     }
 
-    const report: TaxReportData = {
+    return {
       period,
       totalTaxableValue,
       totalCGST,
@@ -209,11 +244,12 @@ export async function generateTaxReport(
       invoiceCount: invoices.length,
       breakdown: Object.entries(hsnBreakdown).map(([hsnCode, data]) => ({
         hsnCode,
-        ...data,
+        taxableValue: data.taxableValue,
+        cgst: data.cgst,
+        sgst: data.sgst,
+        igst: data.igst,
       })),
     };
-
-    return report;
   } catch (error: any) {
     console.error("Generate tax report error:", error);
     throw error;

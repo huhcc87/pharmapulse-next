@@ -1,6 +1,6 @@
 /**
  * Shortcuts Help Button
- * 
+ *
  * Button to open keyboard shortcuts help overlay
  * Can be placed in header, sidebar, or anywhere in the app
  */
@@ -8,27 +8,34 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Keyboard, HelpCircle } from 'lucide-react';
+import { Keyboard } from 'lucide-react';
 import { ShortcutsHelpOverlay } from './ShortcutsHelpOverlay';
 import { Button } from '@/components/ui/button';
 import { useShortcut } from '@/hooks/useShortcut';
 import { isMac } from '@/lib/keyboard-shortcuts/platform';
 
+type ButtonVariant = 'default' | 'outline' | 'ghost';
+type ButtonSize = 'default' | 'sm' | 'lg' | 'icon';
+type LegacySize = ButtonSize | 'md';
+
 interface ShortcutsHelpButtonProps {
-  variant?: 'default' | 'outline' | 'ghost';
-  size?: 'sm' | 'md' | 'lg';
+  variant?: ButtonVariant;
+  size?: LegacySize;
   showIcon?: boolean;
   className?: string;
 }
 
-export function ShortcutsHelpButton({ 
-  variant = 'ghost', 
+export function ShortcutsHelpButton({
+  variant = 'ghost',
   size = 'sm',
   showIcon = true,
-  className = ''
+  className = '',
 }: ShortcutsHelpButtonProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [modKey, setModKey] = useState<string>('Ctrl'); // Default to avoid hydration mismatch
+
+  // Normalize legacy size -> shadcn Button size
+  const normalizedSize: ButtonSize = size === 'md' ? 'default' : size;
 
   // Set mod key on client side only to avoid hydration mismatch
   useEffect(() => {
@@ -51,7 +58,7 @@ export function ShortcutsHelpButton({
     <>
       <Button
         variant={variant}
-        size={size}
+        size={normalizedSize}
         onClick={() => setIsOpen(true)}
         className={className}
         title={`Keyboard Shortcuts (${modKey}+/)`}
@@ -61,10 +68,7 @@ export function ShortcutsHelpButton({
         <span className="sm:hidden">⌨️</span>
       </Button>
 
-      <ShortcutsHelpOverlay 
-        isOpen={isOpen} 
-        onClose={() => setIsOpen(false)} 
-      />
+      <ShortcutsHelpOverlay isOpen={isOpen} onClose={() => setIsOpen(false)} />
     </>
   );
 }

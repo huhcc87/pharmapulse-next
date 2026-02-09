@@ -85,7 +85,8 @@ export async function monitorLicenseCompliance(
     const recentViolations = await prisma.licenseAuditLog.findMany({
       where: {
         tenantId,
-        licenseId: license.id,
+        // ✅ FIX: Prisma field is `licenceId` (not `licenseId`)
+        licenceId: license.id,
         action: {
           in: ["LOGIN_BLOCKED_DEVICE", "LOGIN_BLOCKED_IP"],
         },
@@ -110,9 +111,13 @@ export async function monitorLicenseCompliance(
     // Generate recommendations
     const recommendations: string[] = [];
     if (compliance.recommendedTier === "UPGRADE") {
-      recommendations.push("Consider upgrading your license tier to accommodate current usage.");
+      recommendations.push(
+        "Consider upgrading your license tier to accommodate current usage."
+      );
     } else if (compliance.recommendedTier === "DOWNGRADE") {
-      recommendations.push(`Consider downgrading to save ₹${(compliance.costSavings || 0) / 100} annually.`);
+      recommendations.push(
+        `Consider downgrading to save ₹${(compliance.costSavings || 0) / 100} annually.`
+      );
     }
 
     if (compliance.deviceViolations > 0) {

@@ -16,7 +16,8 @@
     "seed:hsn": "tsx prisma/seed_hsn.ts",
     "seed:drug-library": "tsx prisma/seed-drug-library.ts",
     "db:import-medicines": "tsx prisma/import-medicines.ts",
-    "db:import-drug-library": "tsx prisma/import-drug-library-postgres.ts"
+    "db:import-drug-library": "tsx prisma/import-drug-library-postgres.ts",
+    "postinstall": "prisma generate"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"
@@ -64,8 +65,8 @@
     "postcss": "^8.4.35",
     "qrcode.react": "^4.2.0",
     "razorpay": "^2.9.6",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
     "react-qr-code": "^2.0.18",
     "shadcn-ui": "^0.9.5",
     "stripe": "^20.1.2",
@@ -79,8 +80,8 @@
     "@types/jsbarcode": "^3.11.4",
     "@types/node": "^20.19.27",
     "@types/pg": "^8.16.0",
-    "@types/react": "19.2.8",
-    "@types/react-dom": "19.2.3",
+    "@types/react": "18.2.79",
+    "@types/react-dom": "18.2.25",
     "eslint": "^9.39.2",
     "eslint-config-next": "^16.1.3",
     "prisma": "^5.10.2",

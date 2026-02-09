@@ -7,11 +7,18 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { X, Save, Search, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 
+// Allow Prisma Decimal-like values without importing Prisma types here
+type DecimalLike =
+  | { toNumber: () => number }
+  | { toString: () => string };
+
+type GstRateValue = number | string | DecimalLike | null | undefined;
+
 interface HSNOption {
   id: string;
   hsnCode: string;
   description: string;
-  gstRate: number;
+  gstRate: GstRateValue; // ✅ FIX: allow Decimal-like types
   gstType: string;
   isActive: boolean;
 }
@@ -28,6 +35,32 @@ interface UpdateGstModalProps {
   } | null;
   onClose: () => void;
   onSuccess: (updatedProduct: any) => void;
+}
+
+// ✅ Centralized normalization: always returns a usable number
+function normalizeGstRateToNumber(value: GstRateValue, fallback = 12): number {
+  if (value == null) return fallback;
+
+  if (typeof value === "number") return Number.isFinite(value) ? value : fallback;
+
+  if (typeof value === "string") {
+    const n = parseFloat(value);
+    return Number.isFinite(n) ? n : fallback;
+  }
+
+  // Decimal-like
+  if (typeof value === "object") {
+    if ("toNumber" in value && typeof value.toNumber === "function") {
+      const n = value.toNumber();
+      return Number.isFinite(n) ? n : fallback;
+    }
+    if ("toString" in value && typeof value.toString === "function") {
+      const n = parseFloat(value.toString());
+      return Number.isFinite(n) ? n : fallback;
+    }
+  }
+
+  return fallback;
 }
 
 export default function UpdateGstModal({
@@ -48,22 +81,26 @@ export default function UpdateGstModal({
   const [hsnOptions, setHsnOptions] = useState<HSNOption[]>([]);
   const [isLoadingHsn, setIsLoadingHsn] = useState(false);
   const [selectedHsn, setSelectedHsn] = useState<HSNOption | null>(null);
-  
+
   // AI HSN suggestions
-  const [aiSuggestions, setAiSuggestions] = useState<Array<{
-    hsnCode: string;
-    description: string;
-    gstRate: number;
-    gstType: string;
-    confidence: number;
-    rationale: string;
-    source: "RULES" | "AI";
-    priority: number;
-  }>>([]);
+  const [aiSuggestions, setAiSuggestions] = useState<
+    Array<{
+      hsnCode: string;
+      description: string;
+      gstRate: number;
+      gstType: string;
+      confidence: number;
+      rationale: string;
+      source: "RULES" | "AI";
+      priority: number;
+    }>
+  >([]);
   const [isLoadingSuggestions, setIsLoadingSuggestions] = useState(false);
-  
+
   // Barcode lookup state
-  const [lookupStatus, setLookupStatus] = useState<"idle" | "searching" | "found" | "not_found" | "error">("idle");
+  const [lookupStatus, setLookupStatus] = useState<
+    "idle" | "searching" | "found" | "not_found" | "error"
+  >("idle");
   const [lookupAttempted, setLookupAttempted] = useState(false);
   const [lookupResult, setLookupResult] = useState<any>(null);
   const [barcodeError, setBarcodeError] = useState<string | null>(null);
@@ -77,18 +114,10 @@ export default function UpdateGstModal({
       .then((res) => res.json())
       .then((data) => {
         if (data.ok && data.hsn) {
-          // Normalize gstRate to number (handle Decimal types or null values)
-          const normalizedHsn = data.hsn.map((h: any) => ({
+          // Normalize gstRate to number-like field (but keep original in gstRate for display if needed)
+          const normalizedHsn: HSNOption[] = data.hsn.map((h: any) => ({
             ...h,
-            gstRate: h.gstRate != null 
-              ? (typeof h.gstRate === 'number' 
-                  ? h.gstRate 
-                  : typeof h.gstRate === 'object' && 'toNumber' in h.gstRate
-                    ? h.gstRate.toNumber()
-                    : typeof h.gstRate === 'object' && 'toString' in h.gstRate
-                      ? parseFloat(h.gstRate.toString())
-                      : parseFloat(String(h.gstRate)) || 12)
-              : 12,
+            gstRate: h.gstRate, // keep as-is (Decimal-like ok)
           }));
           setHsnOptions(normalizedHsn);
         }
@@ -100,6 +129,32 @@ export default function UpdateGstModal({
         setIsLoadingHsn(false);
       });
   }, []);
+
+  // Load HSN AI suggestions
+  const loadHsnSuggestions = async () => {
+    if (!product || !product.name) return;
+
+    setIsLoadingSuggestions(true);
+    try {
+      const response = await fetch("/api/hsn/ai-suggest", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          productName: product.name,
+          productId: product.id,
+        }),
+      });
+
+      const data = await response.json();
+      if (data.suggestions) {
+        setAiSuggestions(data.suggestions);
+      }
+    } catch (error) {
+      console.error("Failed to load HSN suggestions:", error);
+    } finally {
+      setIsLoadingSuggestions(false);
+    }
+  };
 
   // Initialize form when product changes
   useEffect(() => {
@@ -117,25 +172,17 @@ export default function UpdateGstModal({
       setLookupAttempted(false);
       setLookupResult(null);
       setAiSuggestions([]);
-      
+
       // Find matching HSN option
       if (product.hsnCode && hsnOptions.length > 0) {
         const match = hsnOptions.find((h) => h.hsnCode === product.hsnCode);
-        if (match && match.gstRate != null) {
+        if (match) {
           setSelectedHsn(match);
+
           // Auto-fill GST from HSN if not overriding
-          // Handle gstRate which might be number, Decimal, or undefined
-          let gstRateStr = "12"; // default
-          if (match.gstRate != null) {
-            if (typeof match.gstRate === 'number') {
-              gstRateStr = match.gstRate.toString();
-            } else if (typeof match.gstRate === 'object' && 'toString' in match.gstRate) {
-              gstRateStr = match.gstRate.toString();
-            } else if (typeof match.gstRate === 'string') {
-              gstRateStr = match.gstRate;
-            }
-          }
-          
+          const gstRateNum = normalizeGstRateToNumber(match.gstRate, 12);
+          const gstRateStr = String(gstRateNum);
+
           setFormData((prev) => ({
             ...prev,
             gstRate: gstRateStr,
@@ -147,33 +194,8 @@ export default function UpdateGstModal({
         loadHsnSuggestions();
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [product, hsnOptions]);
-  
-  // Load HSN AI suggestions
-  const loadHsnSuggestions = async () => {
-    if (!product || !product.name) return;
-    
-    setIsLoadingSuggestions(true);
-    try {
-      const response = await fetch("/api/hsn/ai-suggest", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          productName: product.name,
-          productId: product.id,
-        }),
-      });
-      
-      const data = await response.json();
-      if (data.suggestions) {
-        setAiSuggestions(data.suggestions);
-      }
-    } catch (error) {
-      console.error("Failed to load HSN suggestions:", error);
-    } finally {
-      setIsLoadingSuggestions(false);
-    }
-  };
 
   // Cleanup timeout on unmount
   useEffect(() => {
@@ -187,7 +209,7 @@ export default function UpdateGstModal({
   // Barcode lookup function
   const handleBarcodeLookup = useCallback(async (barcodeValue: string) => {
     const trimmed = barcodeValue.trim();
-    
+
     // Don't lookup if empty or too short
     if (!trimmed || trimmed.length < 8) {
       setLookupStatus("idle");
@@ -203,7 +225,9 @@ export default function UpdateGstModal({
     setLookupResult(null);
 
     try {
-      const response = await fetch(`/api/products/lookup?barcode=${encodeURIComponent(trimmed)}`);
+      const response = await fetch(
+        `/api/products/lookup?barcode=${encodeURIComponent(trimmed)}`
+      );
       const data = await response.json();
 
       if (data.found && data.product) {
@@ -226,7 +250,7 @@ export default function UpdateGstModal({
   // Handle barcode input change with debounce for barcode-first mode
   const handleBarcodeChange = (value: string) => {
     setFormData((prev) => ({ ...prev, barcode: value }));
-    
+
     // Clear previous timeout
     if (lookupTimeoutRef.current) {
       clearTimeout(lookupTimeoutRef.current);
@@ -268,20 +292,11 @@ export default function UpdateGstModal({
     const match = hsnOptions.find((h) => h.hsnCode === hsnCode);
     if (match) {
       setSelectedHsn(match);
+
       if (!formData.gstOverride) {
-        // Auto-fill GST from HSN master when not overriding
-        // Handle gstRate which might be number, Decimal, or undefined
-        let gstRateStr = "12"; // default
-        if (match.gstRate != null) {
-          if (typeof match.gstRate === 'number') {
-            gstRateStr = match.gstRate.toString();
-          } else if (typeof match.gstRate === 'object' && 'toString' in match.gstRate) {
-            gstRateStr = match.gstRate.toString();
-          } else if (typeof match.gstRate === 'string') {
-            gstRateStr = match.gstRate;
-          }
-        }
-        
+        const gstRateNum = normalizeGstRateToNumber(match.gstRate, 12);
+        const gstRateStr = String(gstRateNum);
+
         setFormData((prev) => ({
           ...prev,
           hsnCode,
@@ -303,7 +318,7 @@ export default function UpdateGstModal({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    
+
     // Validation: HSN is required
     if (!formData.hsnCode || !formData.hsnCode.trim()) {
       setError("HSN code is required");
@@ -362,11 +377,14 @@ export default function UpdateGstModal({
   };
 
   // Save button enabled logic
-  const isSaveEnabled = 
+  const isSaveEnabled =
     !isSaving &&
     formData.hsnCode.trim().length >= 4 &&
     (!formData.gstOverride || (formData.gstRate && formData.gstType)) &&
     lookupStatus !== "searching"; // Don't block save during lookup, but wait if actively searching
+
+  // For display: selected HSN GST rate as number
+  const selectedHsnRate = selectedHsn ? normalizeGstRateToNumber(selectedHsn.gstRate, 12) : null;
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
@@ -412,6 +430,7 @@ export default function UpdateGstModal({
                 </button>
               )}
             </div>
+
             {isLoadingHsn ? (
               <div className="w-full px-3 py-2 border rounded-lg bg-gray-50 text-gray-500">
                 Loading HSN codes...
@@ -422,7 +441,7 @@ export default function UpdateGstModal({
                   type="text"
                   value={formData.hsnCode}
                   onChange={(e) => {
-                    const hsnCode = e.target.value.replace(/\D/g, '').slice(0, 8);
+                    const hsnCode = e.target.value.replace(/\D/g, "").slice(0, 8);
                     setFormData({ ...formData, hsnCode });
                   }}
                   placeholder="Enter HSN Code (4-8 digits)"
@@ -432,7 +451,8 @@ export default function UpdateGstModal({
                   autoFocus
                 />
                 <p className="text-xs text-yellow-600">
-                  ⚠️ No HSN codes in master. Enter manually or run: <code className="bg-yellow-100 px-1 rounded">npm run seed:hsn</code>
+                  ⚠️ No HSN codes in master. Enter manually or run:{" "}
+                  <code className="bg-yellow-100 px-1 rounded">npm run seed:hsn</code>
                 </p>
               </div>
             ) : (
@@ -444,25 +464,31 @@ export default function UpdateGstModal({
                 autoFocus
               >
                 <option value="">Select HSN Code</option>
-                {hsnOptions.map((h) => (
-                  <option key={h.id} value={h.hsnCode}>
-                    {h.hsnCode} - {h.description} ({h.gstRate}% {h.gstType})
-                  </option>
-                ))}
+                {hsnOptions.map((h) => {
+                  const rateNum = normalizeGstRateToNumber(h.gstRate, 12);
+                  return (
+                    <option key={h.id} value={h.hsnCode}>
+                      {h.hsnCode} - {h.description} ({rateNum}% {h.gstType})
+                    </option>
+                  );
+                })}
               </select>
             )}
+
             <p className="text-xs text-gray-500 mt-1">
               {selectedHsn
-                ? `Auto-filled: ${selectedHsn.gstRate}% ${selectedHsn.gstType}`
+                ? `Auto-filled: ${selectedHsnRate}% ${selectedHsn.gstType}`
                 : "4-8 digits (e.g., 3004 for medicines)"}
             </p>
-            
+
             {/* AI HSN Suggestions */}
             {!product?.hsnCode && aiSuggestions.length > 0 && (
               <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                 <div className="flex items-center gap-2 mb-2">
                   <AlertCircle className="w-4 h-4 text-blue-600" />
-                  <span className="text-xs font-semibold text-blue-900">Suggested HSN Codes</span>
+                  <span className="text-xs font-semibold text-blue-900">
+                    Suggested HSN Codes
+                  </span>
                 </div>
                 <div className="space-y-2">
                   {aiSuggestions.slice(0, 3).map((suggestion, idx) => (
@@ -473,14 +499,14 @@ export default function UpdateGstModal({
                         setFormData({
                           ...formData,
                           hsnCode: suggestion.hsnCode,
-                          gstRate: suggestion.gstRate != null ? suggestion.gstRate.toString() : "12",
+                          gstRate:
+                            suggestion.gstRate != null
+                              ? suggestion.gstRate.toString()
+                              : "12",
                           gstType: suggestion.gstType || "EXCLUSIVE",
                         });
-                        // Find matching HSN option if exists
                         const match = hsnOptions.find((h) => h.hsnCode === suggestion.hsnCode);
-                        if (match) {
-                          setSelectedHsn(match);
-                        }
+                        if (match) setSelectedHsn(match);
                       }}
                       className={`w-full text-left p-2 rounded border-2 transition-colors ${
                         formData.hsnCode === suggestion.hsnCode
@@ -531,9 +557,7 @@ export default function UpdateGstModal({
               type="checkbox"
               id="gstOverride"
               checked={formData.gstOverride}
-              onChange={(e) =>
-                setFormData({ ...formData, gstOverride: e.target.checked })
-              }
+              onChange={(e) => setFormData({ ...formData, gstOverride: e.target.checked })}
               className="w-4 h-4"
             />
             <label htmlFor="gstOverride" className="text-sm text-gray-700">
@@ -541,7 +565,7 @@ export default function UpdateGstModal({
             </label>
           </div>
 
-          {/* GST Rate (required if override, otherwise read-only) */}
+          {/* GST Rate */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               GST Rate (%) <span className="text-red-500">*</span>
@@ -568,7 +592,7 @@ export default function UpdateGstModal({
             )}
           </div>
 
-          {/* GST Type (required if override, otherwise read-only) */}
+          {/* GST Type */}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">
               GST Type <span className="text-red-500">*</span>
@@ -622,7 +646,11 @@ export default function UpdateGstModal({
               <button
                 type="button"
                 onClick={handleExplicitLookup}
-                disabled={!formData.barcode.trim() || formData.barcode.trim().length < 8 || lookupStatus === "searching"}
+                disabled={
+                  !formData.barcode.trim() ||
+                  formData.barcode.trim().length < 8 ||
+                  lookupStatus === "searching"
+                }
                 className="absolute right-2 top-1/2 transform -translate-y-1/2 p-1 text-gray-400 hover:text-blue-600 disabled:opacity-50 disabled:cursor-not-allowed"
                 title="Lookup barcode"
               >
@@ -633,21 +661,20 @@ export default function UpdateGstModal({
                 )}
               </button>
             </div>
-            
-            {/* Barcode status messages */}
+
             {lookupStatus === "idle" && !lookupAttempted && (
               <p className="text-xs text-gray-500 mt-1">
                 Optional: Scan EAN/GTIN to attach barcode (minimum 8 characters)
               </p>
             )}
-            
+
             {lookupStatus === "searching" && (
               <p className="text-xs text-blue-600 mt-1 flex items-center gap-1">
                 <Loader2 className="w-3 h-3 animate-spin" />
                 Looking up barcode...
               </p>
             )}
-            
+
             {lookupStatus === "found" && lookupResult && (
               <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded text-xs">
                 <div className="flex items-center gap-2 text-green-700">
@@ -659,7 +686,7 @@ export default function UpdateGstModal({
                 </div>
               </div>
             )}
-            
+
             {lookupStatus === "not_found" && lookupAttempted && (
               <div className="mt-2 p-2 bg-yellow-50 border border-yellow-200 rounded text-xs text-yellow-700">
                 <div className="flex items-center gap-2">
@@ -668,7 +695,7 @@ export default function UpdateGstModal({
                 </div>
               </div>
             )}
-            
+
             {lookupStatus === "error" && barcodeError && (
               <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded text-xs text-red-700">
                 <div className="flex items-center gap-2">
@@ -677,7 +704,7 @@ export default function UpdateGstModal({
                 </div>
               </div>
             )}
-            
+
             {lookupStatus === "idle" && lookupAttempted && !formData.barcode.trim() && (
               <p className="text-xs text-gray-500 mt-1">
                 EAN-13, GTIN, or other barcode format
@@ -717,4 +744,3 @@ export default function UpdateGstModal({
     </div>
   );
 }
-

@@ -2,34 +2,44 @@
 // GET /api/purchase-returns - List purchase returns
 // POST /api/purchase-returns - Create purchase return
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { getSessionUser, requireAuth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { createPurchaseReturn } from "@/lib/purchase/purchase-return";
 
 const DEMO_TENANT_ID = 1;
 
+function toInt(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function resolveTenantId(user: any): number {
+  // user.tenantId might be string | number | undefined
+  const n = toInt(user?.tenantId);
+  return n ?? DEMO_TENANT_ID;
+}
+
 // GET /api/purchase-returns - List purchase returns
-export async function GET(req: NextRequest) {
+export async function GET(req: Request) {
   try {
     const user = await getSessionUser();
     requireAuth(user);
 
-    const searchParams = req.url ? new URL(req.url).searchParams : new URLSearchParams();
-    const status = searchParams.get("status");
-    const vendorId = searchParams.get("vendorId");
+    const tenantId = resolveTenantId(user);
+
+    const url = new URL(req.url);
+    const status = url.searchParams.get("status") || undefined;
+    const vendorId = toInt(url.searchParams.get("vendorId"));
 
     const where: any = {
-      tenantId: user.tenantId || DEMO_TENANT_ID,
+      // ✅ Keep this ONLY if PurchaseReturn has tenantId in your Prisma schema.
+      tenantId,
     };
 
-    if (status) {
-      where.status = status;
-    }
-
-    if (vendorId) {
-      where.vendorId = parseInt(vendorId);
-    }
+    if (status) where.status = status;
+    if (vendorId !== undefined) where.vendorId = vendorId;
 
     const purchaseReturns = await prisma.purchaseReturn.findMany({
       where,
@@ -43,40 +53,37 @@ export async function GET(req: NextRequest) {
         },
         lineItems: true,
       },
-      orderBy: {
-        returnDate: "desc",
-      },
+      orderBy: { returnDate: "desc" },
     });
 
-    return NextResponse.json({
-      purchaseReturns,
-    });
+    return NextResponse.json({ purchaseReturns });
   } catch (error: any) {
     console.error("List purchase returns API error:", error);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { error: error?.message || "Internal server error" },
       { status: 500 }
     );
   }
 }
 
 // POST /api/purchase-returns - Create purchase return
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const user = await getSessionUser();
     requireAuth(user);
 
-    const body = await req.json();
-    const { grnId, purchaseOrderId, vendorId, returnItems, reason, notes } = body;
+    const tenantId = resolveTenantId(user);
 
-    if (!vendorId) {
-      return NextResponse.json(
-        { error: "vendorId is required" },
-        { status: 400 }
-      );
+    const body = await req.json();
+    const { grnId, purchaseOrderId, vendorId, returnItems, reason, notes } = body ?? {};
+
+    const vendorIdNum = toInt(vendorId);
+
+    if (vendorIdNum === undefined) {
+      return NextResponse.json({ error: "vendorId is required" }, { status: 400 });
     }
 
-    if (!returnItems || !Array.isArray(returnItems) || returnItems.length === 0) {
+    if (!Array.isArray(returnItems) || returnItems.length === 0) {
       return NextResponse.json(
         { error: "returnItems array is required" },
         { status: 400 }
@@ -84,23 +91,19 @@ export async function POST(req: NextRequest) {
     }
 
     if (!reason) {
-      return NextResponse.json(
-        { error: "reason is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: "reason is required" }, { status: 400 });
     }
 
-    // Create purchase return
     const result = await createPurchaseReturn(
       {
-        grnId: grnId ? parseInt(grnId) : undefined,
-        purchaseOrderId: purchaseOrderId ? parseInt(purchaseOrderId) : undefined,
-        vendorId: parseInt(vendorId),
+        grnId: toInt(grnId),
+        purchaseOrderId: toInt(purchaseOrderId),
+        vendorId: vendorIdNum,
         returnItems,
         reason,
         notes,
       },
-      user.tenantId || DEMO_TENANT_ID
+      tenantId // ✅ always number now
     );
 
     if (!result.success) {
@@ -120,7 +123,7 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error("Create purchase return API error:", error);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { error: error?.message || "Internal server error" },
       { status: 500 }
     );
   }

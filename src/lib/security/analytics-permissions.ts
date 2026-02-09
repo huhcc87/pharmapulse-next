@@ -1,20 +1,19 @@
 /**
  * Analytics Permission Management
- * 
+ *
  * RBAC + per-user grants for Analytics access.
  * Owner has ANALYTICS_VIEW by default.
  * Other users must be explicitly granted by Owner.
  */
 
 import { prisma } from "@/lib/prisma";
-import { Permission } from "@prisma/client";
 
-export type AnalyticsPermission = 
-  | 'ANALYTICS_VIEW'
-  | 'ANALYTICS_VIEW_REVENUE'
-  | 'ANALYTICS_VIEW_SALES'
-  | 'ANALYTICS_VIEW_PRODUCTS'
-  | 'ANALYTICS_EXPORT';
+export type AnalyticsPermission =
+  | "ANALYTICS_VIEW"
+  | "ANALYTICS_VIEW_REVENUE"
+  | "ANALYTICS_VIEW_SALES"
+  | "ANALYTICS_VIEW_PRODUCTS"
+  | "ANALYTICS_EXPORT";
 
 /**
  * Check if user has analytics permission
@@ -25,16 +24,13 @@ export async function hasAnalyticsPermission(
   userId: string,
   permission: AnalyticsPermission
 ): Promise<boolean> {
-  // Check if user is OWNER (has all analytics permissions by default)
+  // NOTE: In your schema Role relation is "permissions" (not "rolePermissions")
   const userRoles = await prisma.userRole.findMany({
-    where: {
-      tenantId,
-      userId,
-    },
+    where: { tenantId, userId },
     include: {
       role: {
         include: {
-          rolePermissions: {
+          permissions: {
             include: {
               permission: true,
             },
@@ -46,15 +42,10 @@ export async function hasAnalyticsPermission(
 
   // Check role permissions
   for (const userRole of userRoles) {
-    if (userRole.role.name === 'OWNER') {
-      // Owner has all permissions
-      return true;
-    }
+    if (userRole.role?.name === "OWNER") return true;
 
-    for (const rp of userRole.role.rolePermissions) {
-      if (rp.permission.name === permission) {
-        return true;
-      }
+    for (const rp of userRole.role?.permissions ?? []) {
+      if (rp.permission?.name === permission) return true;
     }
   }
 
@@ -81,8 +72,8 @@ export async function requireAnalyticsPermission(
   userId: string,
   permission: AnalyticsPermission
 ): Promise<void> {
-  const hasPermission = await hasAnalyticsPermission(tenantId, userId, permission);
-  if (!hasPermission) {
+  const ok = await hasAnalyticsPermission(tenantId, userId, permission);
+  if (!ok) {
     throw new Error(`Permission ${permission} required. Request access from Owner.`);
   }
 }
@@ -96,16 +87,12 @@ export async function grantAnalyticsPermission(
   permission: AnalyticsPermission,
   grantedBy: string
 ): Promise<void> {
-  // Get permission ID
   const permissionDef = await prisma.permissionDef.findUnique({
     where: { name: permission },
   });
 
-  if (!permissionDef) {
-    throw new Error(`Permission ${permission} not found`);
-  }
+  if (!permissionDef) throw new Error(`Permission ${permission} not found`);
 
-  // Grant permission
   await prisma.userPermission.upsert({
     where: {
       tenantId_userId_permissionId: {
@@ -140,9 +127,7 @@ export async function revokeAnalyticsPermission(
     where: { name: permission },
   });
 
-  if (!permissionDef) {
-    throw new Error(`Permission ${permission} not found`);
-  }
+  if (!permissionDef) throw new Error(`Permission ${permission} not found`);
 
   await prisma.userPermission.updateMany({
     where: {
@@ -167,52 +152,50 @@ export async function getUserAnalyticsPermissions(
 ): Promise<Set<AnalyticsPermission>> {
   const permissions = new Set<AnalyticsPermission>();
 
-  // Check if OWNER
   const userRoles = await prisma.userRole.findMany({
     where: { tenantId, userId },
-    include: { role: true },
+    include: {
+      role: {
+        include: {
+          permissions: {
+            include: { permission: true },
+          },
+        },
+      },
+    },
   });
 
-  const isOwner = userRoles.some(ur => ur.role.name === 'OWNER');
-
+  const isOwner = userRoles.some((ur) => ur.role?.name === "OWNER");
   if (isOwner) {
-    // Owner has all permissions
-    return new Set([
-      'ANALYTICS_VIEW',
-      'ANALYTICS_VIEW_REVENUE',
-      'ANALYTICS_VIEW_SALES',
-      'ANALYTICS_VIEW_PRODUCTS',
-      'ANALYTICS_EXPORT',
+    return new Set<AnalyticsPermission>([
+      "ANALYTICS_VIEW",
+      "ANALYTICS_VIEW_REVENUE",
+      "ANALYTICS_VIEW_SALES",
+      "ANALYTICS_VIEW_PRODUCTS",
+      "ANALYTICS_EXPORT",
     ]);
   }
 
-  // Check role permissions
-  for (const userRole of userRoles) {
-    const rolePerms = await prisma.rolePermission.findMany({
-      where: { roleId: userRole.roleId },
-      include: { permission: true },
-    });
-
-    for (const rp of rolePerms) {
-      if (rp.permission.name.startsWith('ANALYTICS_')) {
-        permissions.add(rp.permission.name as AnalyticsPermission);
+  // Role-based permissions
+  for (const ur of userRoles) {
+    for (const rp of ur.role?.permissions ?? []) {
+      const name = rp.permission?.name;
+      if (typeof name === "string" && name.startsWith("ANALYTICS_")) {
+        permissions.add(name as AnalyticsPermission);
       }
     }
   }
 
-  // Check user-specific permissions
+  // User-specific permissions
   const userPerms = await prisma.userPermission.findMany({
-    where: {
-      tenantId,
-      userId,
-      revokedAt: null,
-    },
+    where: { tenantId, userId, revokedAt: null },
     include: { permission: true },
   });
 
   for (const up of userPerms) {
-    if (up.permission.name.startsWith('ANALYTICS_')) {
-      permissions.add(up.permission.name as AnalyticsPermission);
+    const name = up.permission?.name;
+    if (typeof name === "string" && name.startsWith("ANALYTICS_")) {
+      permissions.add(name as AnalyticsPermission);
     }
   }
 
@@ -224,56 +207,55 @@ export async function getUserAnalyticsPermissions(
  */
 export async function getUsersWithAnalyticsPermissions(
   tenantId: string
-): Promise<Array<{
-  userId: string;
-  email: string;
-  name: string;
-  roles: string[];
-  permissions: AnalyticsPermission[];
-  grantedBy?: string;
-  grantedAt?: Date;
-}>> {
-  // Get all users in tenant (you'll need to adapt this to your User model)
-  // For now, we'll get from user_roles
+): Promise<
+  Array<{
+    userId: string;
+    email: string;
+    name: string;
+    roles: string[];
+    permissions: AnalyticsPermission[];
+    grantedBy?: string;
+    grantedAt?: Date;
+  }>
+> {
   const userRoles = await prisma.userRole.findMany({
     where: { tenantId },
-    include: {
-      role: true,
-    },
+    include: { role: true },
   });
 
-  const userIds = new Set(userRoles.map(ur => ur.userId));
-  const result: Array<any> = [];
+  const userIds = Array.from(new Set(userRoles.map((ur) => ur.userId)));
+  const result: Array<{
+    userId: string;
+    email: string;
+    name: string;
+    roles: string[];
+    permissions: AnalyticsPermission[];
+    grantedBy?: string;
+    grantedAt?: Date;
+  }> = [];
 
   for (const userId of userIds) {
     const roles = userRoles
-      .filter(ur => ur.userId === userId)
-      .map(ur => ur.role.name);
+      .filter((ur) => ur.userId === userId)
+      .map((ur) => ur.role?.name)
+      .filter(Boolean) as string[];
 
-    const permissions = await getUserAnalyticsPermissions(tenantId, userId);
+    const perms = await getUserAnalyticsPermissions(tenantId, userId);
 
-    // Get grant info for user permissions
     const userPerms = await prisma.userPermission.findMany({
-      where: {
-        tenantId,
-        userId,
-        revokedAt: null,
-      },
+      where: { tenantId, userId, revokedAt: null },
       include: { permission: true },
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
     });
-
-    const grantedBy = userPerms[0]?.grantedBy;
-    const grantedAt = userPerms[0]?.createdAt;
 
     result.push({
       userId,
-      email: `user-${userId}@pharmapulse.com`, // Adapt to your User model
-      name: `User ${userId}`, // Adapt to your User model
+      email: `user-${userId}@pharmapulse.com`, // TODO: replace with real User table
+      name: `User ${userId}`, // TODO: replace with real User table
       roles,
-      permissions: Array.from(permissions),
-      grantedBy,
-      grantedAt,
+      permissions: Array.from(perms),
+      grantedBy: userPerms[0]?.grantedBy,
+      grantedAt: userPerms[0]?.createdAt,
     });
   }
 

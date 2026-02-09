@@ -1,9 +1,17 @@
+// src/lib/ai/product-recommendations.ts
 // AI Product Recommendations
 // Collaborative filtering and content-based recommendations for pharmacy products
 
 import { prisma } from "@/lib/prisma";
+import { Prisma } from "@prisma/client";
 
-export type RecommendationType = "CROSS_SELL" | "UPSELL" | "SEASONAL" | "GENERIC" | "ALTERNATIVE" | "BUNDLE";
+export type RecommendationType =
+  | "CROSS_SELL"
+  | "UPSELL"
+  | "SEASONAL"
+  | "GENERIC"
+  | "ALTERNATIVE"
+  | "BUNDLE";
 
 export interface ProductRecommendation {
   productId: number;
@@ -15,11 +23,16 @@ export interface ProductRecommendation {
   pricePaise?: number;
   hsnCode?: string | null;
   gstRate?: number | null;
-  // Bundle info
+
   bundleDiscountPercent?: number;
-  // Seasonal/Contextual
+
   season?: string;
   festival?: string;
+}
+
+function firstToken(name: string): string {
+  const t = name.split(/\s+/).filter(Boolean)[0];
+  return (t ?? name).trim();
 }
 
 /**
@@ -32,78 +45,74 @@ export async function getProductRecommendations(
 ): Promise<ProductRecommendation[]> {
   const recommendations: ProductRecommendation[] = [];
 
-  // Strategy 1: Cross-sell based on purchase history (collaborative filtering)
+  // Strategy 1: Cross-sell (invoice co-occurrence)
   if (cartItems.length > 0) {
-    // Get products frequently bought together
-    const cartProductIds = cartItems.map((item) => item.productId).filter(Boolean) as number[];
-    
+    const cartProductIds = cartItems
+      .map((i) => i.productId)
+      .filter((v): v is number => typeof v === "number");
+
     if (cartProductIds.length > 0) {
-      const frequentlyBoughtTogether = await getFrequentlyBoughtTogether(cartProductIds, tenantId);
-      recommendations.push(...frequentlyBoughtTogether);
+      recommendations.push(...(await getFrequentlyBoughtTogether(cartProductIds, tenantId)));
     }
   }
 
   // Strategy 2: Seasonal recommendations
-  const seasonalRecs = await getSeasonalRecommendations(tenantId);
-  recommendations.push(...seasonalRecs);
+  recommendations.push(...(await getSeasonalRecommendations(tenantId)));
 
-  // Strategy 3: Generic alternatives for cart items
+  // Strategy 3: Generic alternatives
   if (cartItems.length > 0) {
-    const genericAlternatives = await getGenericAlternatives(cartItems, tenantId);
-    recommendations.push(...genericAlternatives);
+    recommendations.push(...(await getGenericAlternatives(cartItems)));
   }
 
-  // Strategy 4: Customer-specific recommendations
+  // Strategy 4: Customer-specific (placeholder)
   if (customerId) {
-    const customerRecs = await getCustomerSpecificRecommendations(customerId, tenantId);
-    recommendations.push(...customerRecs);
+    recommendations.push(...(await getCustomerSpecificRecommendations(customerId, tenantId)));
   }
 
-  // Remove duplicates (same productId) and sort by score
-  const uniqueRecs = recommendations.reduce((acc, rec) => {
-    const existing = acc.find((r) => r.productId === rec.productId);
-    if (!existing || existing.score < rec.score) {
-      return acc.filter((r) => r.productId !== rec.productId).concat(rec);
-    }
-    return acc;
-  }, [] as ProductRecommendation[]);
+  // De-dupe by productId, keep highest score
+  const byId = new Map<number, ProductRecommendation>();
+  for (const rec of recommendations) {
+    const prev = byId.get(rec.productId);
+    if (!prev || rec.score > prev.score) byId.set(rec.productId, rec);
+  }
 
-  return uniqueRecs
+  return Array.from(byId.values())
     .sort((a, b) => b.score - a.score)
-    .slice(0, 10); // Top 10 recommendations
+    .slice(0, 10);
 }
 
 /**
- * Get products frequently bought together (collaborative filtering)
+ * Collaborative filtering: products frequently bought together
  */
 async function getFrequentlyBoughtTogether(
   productIds: number[],
   tenantId: number
 ): Promise<ProductRecommendation[]> {
-  // Get invoices containing these products
-  const coOccurrenceQuery = await prisma.$queryRaw<Array<{
-    recommendedProductId: number;
-    coOccurrenceCount: bigint;
-  }>>`
+  if (productIds.length === 0) return [];
+
+  const rows = await prisma.$queryRaw<
+    Array<{ recommendedProductId: number; coOccurrenceCount: bigint }>
+  >(Prisma.sql`
     SELECT 
       ili2."productId" as "recommendedProductId",
       COUNT(*) as "coOccurrenceCount"
     FROM "InvoiceLineItem" ili1
     INNER JOIN "InvoiceLineItem" ili2 ON ili1."invoiceId" = ili2."invoiceId"
     INNER JOIN "Invoice" inv ON ili1."invoiceId" = inv.id
-    WHERE ili1."productId" = ANY(ARRAY[${productIds.join(",")}]::int[])
-      AND ili2."productId" != ALL(ARRAY[${productIds.join(",")}]::int[])
+    WHERE ili1."productId" IN (${Prisma.join(productIds)})
+      AND ili2."productId" NOT IN (${Prisma.join(productIds)})
       AND ili2."productId" IS NOT NULL
       AND inv."tenantId" = ${tenantId}
       AND inv."createdAt" > NOW() - INTERVAL '90 days'
     GROUP BY ili2."productId"
     ORDER BY "coOccurrenceCount" DESC
     LIMIT 10
-  `;
+  `);
 
   const recommendations: ProductRecommendation[] = [];
+  const maxCount = Number(rows[0]?.coOccurrenceCount ?? 1);
 
-  for (const item of coOccurrenceQuery) {
+  for (const item of rows) {
     const product = await prisma.product.findUnique({
       where: { id: item.recommendedProductId },
       select: {
@@ -116,65 +125,57 @@ async function getFrequentlyBoughtTogether(
       },
     });
 
-    if (product) {
-      // Score based on co-occurrence count (normalized)
-      const maxCount = Number(coOccurrenceQuery[0]?.coOccurrenceCount || 1);
-      const score = Math.min(100, (Number(item.coOccurrenceCount) / maxCount) * 100);
+    if (!product) continue;
 
-      recommendations.push({
-        productId: product.id,
-        productName: product.name,
-        recommendationType: "CROSS_SELL",
-        score,
-        reason: `Frequently bought together with items in your cart`,
-        category: product.category || undefined,
-        pricePaise: product.salePrice ? Math.round(product.salePrice * 100) : undefined,
-        hsnCode: product.hsnCode,
-        gstRate: product.gstRate ? Number(product.gstRate) : undefined,
-      });
-    }
+    const score = Math.min(100, (Number(item.coOccurrenceCount) / maxCount) * 100);
+
+    recommendations.push({
+      productId: product.id,
+      productName: product.name,
+      recommendationType: "CROSS_SELL",
+      score,
+      reason: "Frequently bought together with items in your cart",
+      category: product.category ?? undefined,
+      pricePaise: product.salePrice ? Math.round(product.salePrice * 100) : undefined,
+      hsnCode: product.hsnCode,
+      gstRate: product.gstRate ? Number(product.gstRate) : undefined,
+    });
   }
 
   return recommendations;
 }
 
 /**
- * Get seasonal recommendations
+ * Seasonal recommendations (based on invoice history for the current month)
  */
 async function getSeasonalRecommendations(tenantId: number): Promise<ProductRecommendation[]> {
+  const month = new Date().getMonth() + 1;
+
+  let season = "GENERAL";
+  if (month >= 6 && month <= 9) season = "MONSOON";
+  else if (month >= 10 || month <= 2) season = "WINTER";
+  else season = "SUMMER";
+
+  const rows = await prisma.$queryRaw<Array<{ productId: number; saleCount: bigint }>>(
+    Prisma.sql`
+      SELECT 
+        "productId",
+        COUNT(*) as "saleCount"
+      FROM "InvoiceLineItem"
+      INNER JOIN "Invoice" ON "InvoiceLineItem"."invoiceId" = "Invoice".id
+      WHERE "productId" IS NOT NULL
+        AND "Invoice"."tenantId" = ${tenantId}
+        AND EXTRACT(MONTH FROM "Invoice"."createdAt") = ${month}
+        AND "Invoice"."createdAt" > NOW() - INTERVAL '2 years'
+      GROUP BY "productId"
+      ORDER BY "saleCount" DESC
+      LIMIT 5
+    `
+  );
+
   const recommendations: ProductRecommendation[] = [];
-  const month = new Date().getMonth() + 1; // 1-12
 
-  // Determine season
-  let season: string = "GENERAL";
-  if (month >= 6 && month <= 9) {
-    season = "MONSOON"; // June-September
-  } else if (month >= 10 || month <= 2) {
-    season = "WINTER"; // October-February
-  } else {
-    season = "SUMMER"; // March-May
-  }
-
-  // Get seasonal products (products with high sales in this season)
-  const seasonalProducts = await prisma.$queryRaw<Array<{
-    productId: number;
-    saleCount: bigint;
-  }>>`
-    SELECT 
-      "productId",
-      COUNT(*) as "saleCount"
-    FROM "InvoiceLineItem"
-    INNER JOIN "Invoice" ON "InvoiceLineItem"."invoiceId" = "Invoice".id
-    WHERE "productId" IS NOT NULL
-      AND "Invoice"."tenantId" = ${tenantId}
-      AND EXTRACT(MONTH FROM "Invoice"."createdAt") = ${month}
-      AND "Invoice"."createdAt" > NOW() - INTERVAL '2 years'
-    GROUP BY "productId"
-    ORDER BY "saleCount" DESC
-    LIMIT 5
-  `;
-
-  for (const item of seasonalProducts) {
+  for (const item of rows) {
     const product = await prisma.product.findUnique({
       where: { id: item.productId },
       select: {
@@ -187,50 +188,45 @@ async function getSeasonalRecommendations(tenantId: number): Promise<ProductReco
       },
     });
 
-    if (product) {
-      recommendations.push({
-        productId: product.id,
-        productName: product.name,
-        recommendationType: "SEASONAL",
-        score: 75, // Base seasonal score
-        reason: `Popular ${season.toLowerCase()} product`,
-        season,
-        category: product.category || undefined,
-        pricePaise: product.salePrice ? Math.round(product.salePrice * 100) : undefined,
-        hsnCode: product.hsnCode,
-        gstRate: product.gstRate ? Number(product.gstRate) : undefined,
-      });
-    }
+    if (!product) continue;
+
+    recommendations.push({
+      productId: product.id,
+      productName: product.name,
+      recommendationType: "SEASONAL",
+      score: 75,
+      reason: `Popular ${season.toLowerCase()} product`,
+      season,
+      category: product.category ?? undefined,
+      pricePaise: product.salePrice ? Math.round(product.salePrice * 100) : undefined,
+      hsnCode: product.hsnCode,
+      gstRate: product.gstRate ? Number(product.gstRate) : undefined,
+    });
   }
 
   return recommendations;
 }
 
 /**
- * Get generic alternatives for branded products
+ * Generic alternatives (catalog heuristic)
+ *
+ * IMPORTANT:
+ * Your Product model does NOT have tenantId, so we cannot filter Product by tenantId.
+ * Tenant filtering should be applied via Store/Location if your schema supports it.
  */
 async function getGenericAlternatives(
-  cartItems: Array<{ productName: string; category?: string }>,
-  tenantId: number
+  cartItems: Array<{ productName: string; category?: string }>
 ): Promise<ProductRecommendation[]> {
   const recommendations: ProductRecommendation[] = [];
 
-  // Simple heuristic: Look for products with similar names/categories
-  // In production, use drug library composition matching
-  
-  for (const item of cartItems.slice(0, 3)) { // Limit to 3 items
-    // Search for generic alternatives (products with "generic" in name or similar category)
+  for (const item of cartItems.slice(0, 3)) {
+    const token = firstToken(item.productName);
+
     const alternatives = await prisma.product.findMany({
       where: {
-        tenantId,
-        category: item.category || undefined,
-        name: {
-          contains: item.productName.split(" ")[0], // First word of product name
-          mode: "insensitive",
-        },
-        NOT: {
-          name: item.productName, // Exclude same product
-        },
+        category: item.category ?? undefined,
+        name: { contains: token, mode: "insensitive" },
+        NOT: { name: item.productName },
       },
       take: 2,
       select: {
@@ -250,7 +246,7 @@ async function getGenericAlternatives(
         recommendationType: "GENERIC",
         score: 60,
         reason: `Generic alternative to ${item.productName}`,
-        category: alt.category || undefined,
+        category: alt.category ?? undefined,
         pricePaise: alt.salePrice ? Math.round(alt.salePrice * 100) : undefined,
         hsnCode: alt.hsnCode,
         gstRate: alt.gstRate ? Number(alt.gstRate) : undefined,
@@ -262,44 +258,21 @@ async function getGenericAlternatives(
 }
 
 /**
- * Get customer-specific recommendations based on purchase history
+ * Customer-specific recommendations (placeholder)
  */
 async function getCustomerSpecificRecommendations(
   customerId: number,
   tenantId: number
 ): Promise<ProductRecommendation[]> {
-  const recommendations: ProductRecommendation[] = [];
-
-  // Get customer's purchase history
-  const customerInvoices = await prisma.invoice.findMany({
+  await prisma.invoice.findMany({
     where: {
       customerId,
       tenantId,
-      createdAt: {
-        gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000), // Last 90 days
-      },
+      createdAt: { gte: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
     },
-    include: {
-      lineItems: {
-        where: {
-          productId: { not: null },
-        },
-        take: 10,
-      },
-    },
+    take: 1,
+    select: { id: true },
   });
 
-  // Get frequently purchased categories
-  const categoryCounts = new Map<string, number>();
-  customerInvoices.forEach((inv) => {
-    inv.lineItems.forEach((item) => {
-      // Category would need to come from Product relation
-      // For now, skip category-based recommendations
-    });
-  });
-
-  // Get products from same categories (upsell)
-  // This is a simplified version - can be enhanced with ML
-
-  return recommendations;
+  return [];
 }

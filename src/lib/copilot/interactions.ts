@@ -1,3 +1,4 @@
+// src/lib/copilot/interactions.ts
 // Combined drug interaction checking (rules + AI)
 
 import { checkInteractionsRules, checkDuplicateTherapy } from "./rules-provider";
@@ -20,6 +21,26 @@ export interface CounselingResult {
   source: "RULES" | "AI";
 }
 
+function normalizeAISuggestion(ai: AIInteractionSuggestion): InteractionResult {
+  return {
+    drug1: ai.drug1,
+    drug2: ai.drug2,
+    severity: ai.severity,
+    description: ai.description,
+    mechanism: ai.mechanism ?? "", // ✅ ensure string (or change to undefined if you prefer)
+    recommendation: ai.recommendation,
+    source: "AI",
+    confidence: ai.confidence ?? 0.7,
+  };
+}
+
+function samePair(a: { drug1: string; drug2: string }, b: { drug1: string; drug2: string }) {
+  return (
+    (a.drug1 === b.drug1 && a.drug2 === b.drug2) ||
+    (a.drug1 === b.drug2 && a.drug2 === b.drug1)
+  );
+}
+
 /**
  * Check for drug interactions (rules first, then AI if needed)
  */
@@ -32,9 +53,9 @@ export async function checkInteractions(
   }
 ): Promise<InteractionResult[]> {
   // Always check rules first (deterministic)
-  const ruleInteractions = checkInteractionsRules(drugNames);
+  const ruleInteractions: InteractionResult[] = checkInteractionsRules(drugNames);
 
-  // If rules found high/medium severity, return early (don't need AI)
+  // If rules found high/medium severity and AI is not requested, return early
   const hasHighMedium = ruleInteractions.some(
     (i) => i.severity === "HIGH" || i.severity === "MEDIUM"
   );
@@ -46,23 +67,19 @@ export async function checkInteractions(
   // Optionally check with AI for additional insights
   if (options?.useAI && process.env.OPENAI_API_KEY) {
     try {
-      const aiInteractions = await checkInteractionsAI(
+      const aiSuggestions = await checkInteractionsAI(
         drugNames,
         options.patientAge,
         options.allergies
       );
 
-      // Merge, preferring rules over AI for same drug pairs
-      const combined = [...ruleInteractions];
-      for (const ai of aiInteractions) {
-        // Only add if not already covered by rules
-        const exists = ruleInteractions.some(
-          (r) =>
-            (r.drug1 === ai.drug1 && r.drug2 === ai.drug2) ||
-            (r.drug1 === ai.drug2 && r.drug2 === ai.drug1)
-        );
+      // ✅ Ensure combined is InteractionResult[] (not inferred narrower type)
+      const combined: InteractionResult[] = [...ruleInteractions];
+
+      for (const ai of aiSuggestions) {
+        const exists = ruleInteractions.some((r) => samePair(r, ai));
         if (!exists) {
-          combined.push(ai);
+          combined.push(normalizeAISuggestion(ai));
         }
       }
 

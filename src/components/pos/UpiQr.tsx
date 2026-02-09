@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import QRCode from "qrcode";
+import React, { useMemo } from "react";
+import { QRCodeSVG } from "qrcode.react";
 
 type Props = {
   payeeVpa: string; // example: "yourstore@upi"
@@ -21,22 +21,24 @@ export function buildUpiUri(p: Props) {
 }
 
 export function UpiQr(props: Props) {
-  const [dataUrl, setDataUrl] = useState("");
+  const uri = useMemo(() => buildUpiUri(props), [
+    props.payeeVpa,
+    props.payeeName,
+    props.amount,
+    props.note,
+  ]);
 
-  useEffect(() => {
-    const uri = buildUpiUri(props);
-    QRCode.toDataURL(uri, { margin: 1, width: 220 })
-      .then(setDataUrl)
-      .catch(() => setDataUrl(""));
-  }, [props.payeeVpa, props.payeeName, props.amount, props.note]);
-
-  if (!dataUrl) return null;
+  // Basic guard (avoid rendering broken/empty QR)
+  if (!props.payeeVpa || !props.payeeName || !Number.isFinite(props.amount)) return null;
 
   return (
     <div className="flex flex-col items-center gap-2">
-      <img src={dataUrl} alt="UPI QR" className="rounded-md border" />
-      <div className="text-xs text-slate-600 break-all">
-        {buildUpiUri(props)}
+      <div className="rounded-md border bg-white p-2">
+        <QRCodeSVG value={uri} size={220} marginSize={1} />
+      </div>
+
+      <div className="text-xs text-slate-600 break-all text-center max-w-[260px]">
+        {uri}
       </div>
     </div>
   );

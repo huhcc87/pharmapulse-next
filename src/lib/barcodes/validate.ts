@@ -13,7 +13,6 @@ export function normalizeBarcode(input: string): string {
 }
 
 export function detectBarcodeType(code: string): BarcodeType | null {
-  // NOTE: this function expects DIGITS ONLY input (EAN/UPC). INMED is handled earlier.
   if (code.length === 8) return "EAN8";
   if (code.length === 13) return "EAN13";
   if (code.length === 12) return "UPCA";
@@ -21,14 +20,13 @@ export function detectBarcodeType(code: string): BarcodeType | null {
 }
 
 function computeEanLikeCheckDigit(bodyDigits: string): number {
-  // Works for EAN-13 body (12 digits) and EAN-8 body (7 digits) and UPC-A body (11 digits)
-  // weighting: starting from leftmost body digit: positions 1..n
-  // sum odd positions *1 + even positions *3, then (10 - sum%10)%10
-  const digits = bodyDigits.split("").map((c) => Number(c));
+  const digits = bodyDigits.split("").map(Number);
   let sum = 0;
+
   for (let i = 0; i < digits.length; i++) {
     sum += digits[i] * (i % 2 === 0 ? 1 : 3);
   }
+
   return (10 - (sum % 10)) % 10;
 }
 
@@ -40,28 +38,25 @@ export function validateCheckDigit(
 
   if (type === "EAN13") {
     if (code.length !== 13) return false;
-    const body = code.slice(0, 12);
-    const check = Number(code[12]);
-    return computeEanLikeCheckDigit(body) === check;
+    return computeEanLikeCheckDigit(code.slice(0, 12)) === Number(code[12]);
   }
 
   if (type === "EAN8") {
     if (code.length !== 8) return false;
-    const body = code.slice(0, 7);
-    const check = Number(code[7]);
-    return computeEanLikeCheckDigit(body) === check;
+    return computeEanLikeCheckDigit(code.slice(0, 7)) === Number(code[7]);
   }
 
   if (type === "UPCA") {
     if (code.length !== 12) return false;
-    const body = code.slice(0, 11);
-    const check = Number(code[11]);
-    return computeEanLikeCheckDigit(body) === check;
+    return computeEanLikeCheckDigit(code.slice(0, 11)) === Number(code[11]);
   }
 
   return false;
 }
 
+/**
+ * Unified barcode validator (EAN / UPC / INMED)
+ */
 export function validateBarcode(input: string, forcedType?: BarcodeType) {
   const raw = (input ?? "").toString().trim();
 
@@ -75,33 +70,61 @@ export function validateBarcode(input: string, forcedType?: BarcodeType) {
         type: "INMED" as const,
       };
     }
-    return { ok: true as const, normalized: raw, type: "INMED" as const };
+
+    return {
+      ok: true as const,
+      normalized: raw,
+      type: "INMED" as const,
+    };
   }
 
-  // ✅ 2) EAN/UPC
+  // ✅ 2) EAN / UPC
   const normalized = normalizeBarcode(raw);
 
   if (!normalized) {
-    return { ok: false as const, error: "Barcode is empty", normalized, type: null as const };
-  }
-  if (!/^\d+$/.test(normalized)) {
-    return { ok: false as const, error: "Barcode must be digits only", normalized, type: null as const };
-  }
-
-  const type = (forcedType ?? detectBarcodeType(normalized)) as Exclude<BarcodeType, "INMED"> | null;
-
-  if (!type || type === "INMED") {
     return {
       ok: false as const,
-      error: "Unsupported barcode length (must be 8, 12, or 13 digits) or INMED-000001",
+      error: "Barcode is empty",
       normalized,
-      type: null as const,
+      type: null,
+    };
+  }
+
+  if (!/^\d+$/.test(normalized)) {
+    return {
+      ok: false as const,
+      error: "Barcode must be digits only",
+      normalized,
+      type: null,
+    };
+  }
+
+  const type =
+    (forcedType ?? detectBarcodeType(normalized)) as
+      | Exclude<BarcodeType, "INMED">
+      | null;
+
+  if (!type) {
+    return {
+      ok: false as const,
+      error: "Unsupported barcode length (must be 8, 12, or 13 digits)",
+      normalized,
+      type: null,
     };
   }
 
   if (!validateCheckDigit(type, normalized)) {
-    return { ok: false as const, error: "Invalid check digit", normalized, type };
+    return {
+      ok: false as const,
+      error: "Invalid check digit",
+      normalized,
+      type,
+    };
   }
 
-  return { ok: true as const, normalized, type };
+  return {
+    ok: true as const,
+    normalized,
+    type,
+  };
 }

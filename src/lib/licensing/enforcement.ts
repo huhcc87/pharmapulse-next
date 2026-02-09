@@ -1,17 +1,17 @@
 /**
  * Enterprise Licensing Enforcement Middleware
- * 
+ *
  * Enforces:
  * 1. License exists and is active
  * 2. IP address matches allowed IP (if set)
  * 3. Device ID matches registered device (1 PC per tenant)
- * 
+ *
  * All checks are server-side and auditable.
  */
 
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { getSessionUser, requireAuth } from "@/lib/auth";
+import { getSessionUser } from "@/lib/auth";
 import { extractClientIP, compareIPs } from "./ip-extraction";
 import { getOrCreateDeviceId, generateDeviceFingerprint } from "./device-id";
 
@@ -28,7 +28,7 @@ export interface LicenseCheckContext {
   tenantId: string;
   userId: string;
   userRole: string;
-  requestIP: string | null;
+  requestIP: string | null; // IMPORTANT: use null (not undefined) for “missing”
   deviceId: string;
   route: string;
   userAgent: string | null;
@@ -36,19 +36,12 @@ export interface LicenseCheckContext {
 
 /**
  * Main licensing enforcement function
- * 
- * Checks in this order:
- * 1. License exists and status == active
- * 2. IP policy (if allowed_ip is set, must match)
- * 3. Device policy (only one active device per tenant)
- * 
- * @param context - License check context
- * @returns Enforcement result
  */
 export async function enforceLicense(
   context: LicenseCheckContext
 ): Promise<LicenseEnforcementResult> {
-  const { tenantId, userId, userRole, requestIP, deviceId, route, userAgent } = context;
+  const { tenantId, userId, userRole, requestIP, deviceId, route, userAgent } =
+    context;
 
   try {
     // 1. Check license exists and is active
@@ -74,12 +67,17 @@ export async function enforceLicense(
     }
 
     if (license.status !== "active") {
-      await logLicenseAction(tenantId, userId, "LOGIN_BLOCKED_LICENSE_INACTIVE", {
-        route,
-        ip: requestIP,
-        deviceId,
-        reason: `License status: ${license.status}`,
-      });
+      await logLicenseAction(
+        tenantId,
+        userId,
+        "LOGIN_BLOCKED_LICENSE_INACTIVE",
+        {
+          route,
+          ip: requestIP,
+          deviceId,
+          reason: `License status: ${license.status}`,
+        }
+      );
 
       return {
         allowed: false,
@@ -104,13 +102,13 @@ export async function enforceLicense(
           allowed: false,
           error: {
             code: "IP_NOT_DETECTED",
-            message: "Could not determine your IP address. Please contact support.",
+            message:
+              "Could not determine your IP address. Please contact support.",
           },
         };
       }
 
       if (!compareIPs(requestIP, license.allowedIp)) {
-        // Mask IPs for security
         const maskedAllowed = maskIP(license.allowedIp);
         const maskedRequest = maskIP(requestIP);
 
@@ -150,26 +148,31 @@ export async function enforceLicense(
     if (!activeDevice) {
       // No device registered yet - allow registration only for Owner/Admin
       if (userRole !== "owner" && userRole !== "super_admin") {
-        await logLicenseAction(tenantId, userId, "LOGIN_BLOCKED_DEVICE_REG_REQUIRED", {
-          route,
-          ip: requestIP,
-          deviceId,
-          reason: "No device registered and user is not owner/admin",
-        });
+        await logLicenseAction(
+          tenantId,
+          userId,
+          "LOGIN_BLOCKED_DEVICE_REG_REQUIRED",
+          {
+            route,
+            ip: requestIP,
+            deviceId,
+            reason: "No device registered and user is not owner/admin",
+          }
+        );
 
         return {
           allowed: false,
           error: {
             code: "OWNER_REQUIRED_FOR_FIRST_DEVICE_REG",
-            message: "No device is registered for this license. Only the owner can register the first device. Please contact the owner.",
+            message:
+              "No device is registered for this license. Only the owner can register the first device. Please contact the owner.",
           },
         };
       }
 
       // Owner/Admin can register first device
-      // Auto-register this device
       const fingerprint = generateDeviceFingerprint(userAgent, new Headers());
-      
+
       await prisma.deviceRegistration.create({
         data: {
           tenantId,
@@ -177,7 +180,7 @@ export async function enforceLicense(
           deviceId,
           deviceType: "web",
           deviceLabel: "Primary Device",
-          registeredIp: requestIP,
+          registeredIp: requestIP, // string | null ✅
         },
       });
 
@@ -215,7 +218,8 @@ export async function enforceLicense(
           code: "DEVICE_MISMATCH",
           message: "This license is locked to another device.",
           details: {
-            activeDeviceLabel: activeDevice.deviceLabel || "Registered Device",
+            activeDeviceLabel:
+              activeDevice.deviceLabel || "Registered Device",
             registeredAt: activeDevice.registeredAt.toISOString(),
           },
         },
@@ -243,19 +247,20 @@ export async function enforceLicense(
     return { allowed: true };
   } catch (error: any) {
     console.error("License enforcement error:", error);
-    
+
     await logLicenseAction(tenantId, userId, "LICENSE_CHECK_ERROR", {
       route,
       ip: requestIP,
       deviceId,
-      error: error.message,
+      error: error?.message,
     });
 
     return {
       allowed: false,
       error: {
         code: "ENFORCEMENT_ERROR",
-        message: "An error occurred during license verification. Please try again.",
+        message:
+          "An error occurred during license verification. Please try again.",
       },
     };
   }
@@ -299,22 +304,10 @@ async function logLicenseAction(
 
 /**
  * Middleware wrapper for Next.js API routes
- * 
- * Usage:
- * ```ts
- * export async function GET(req: NextRequest) {
- *   const enforcement = await checkLicenseEnforcement(req);
- *   if (!enforcement.allowed) {
- *     return NextResponse.json(enforcement.error, { status: 403 });
- *   }
- *   // ... your route handler
- * }
- * ```
  */
 export async function checkLicenseEnforcement(
   request: NextRequest
 ): Promise<LicenseEnforcementResult> {
-  // Get user session
   const user = await getSessionUser();
   if (!user) {
     return {
@@ -326,13 +319,12 @@ export async function checkLicenseEnforcement(
     };
   }
 
-  // Extract context
-  const requestIP = extractClientIP(request);
+  // Normalize potentially-undefined values into the exact types our context expects
+  const requestIP = extractClientIP(request) ?? null; // ✅ FIX (undefined -> null)
   const deviceId = await getOrCreateDeviceId();
   const userAgent = request.headers.get("user-agent");
   const route = request.nextUrl.pathname;
 
-  // Enforce license
   return await enforceLicense({
     tenantId: user.tenantId,
     userId: user.userId,

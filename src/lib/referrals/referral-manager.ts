@@ -1,3 +1,4 @@
+// src/lib/referrals/referral-manager.ts
 // Referral Program Management
 // Handles referral code generation, tracking, and rewards
 
@@ -25,7 +26,6 @@ export async function generateReferralCode(
   try {
     const { customerId, tenantId = 1 } = input;
 
-    // Check if customer already has a referral code
     const existing = await prisma.referralCode.findFirst({
       where: {
         referrerId: customerId,
@@ -34,65 +34,48 @@ export async function generateReferralCode(
       },
     });
 
-    if (existing) {
-      return {
-        success: true,
-        referralCode: existing.code,
-      };
-    }
+    if (existing) return { success: true, referralCode: existing.code };
 
-    // Generate unique referral code
-    let code: string;
+    let code = "";
     let isUnique = false;
     let attempts = 0;
 
-    while (!isUnique && attempts < 10) {
-      // Generate 6-character alphanumeric code
-      const randomBytes = crypto.randomBytes(3);
-      code = `REF-${randomBytes.toString("base64").replace(/[^A-Z0-9]/g, "").substring(0, 6).toUpperCase()}`;
+    while (!isUnique && attempts < 15) {
+      const token = crypto.randomBytes(3).toString("hex").toUpperCase(); // 6 chars
+      code = `REF-${token}`;
 
-      // Check if code already exists
       const exists = await prisma.referralCode.findUnique({
         where: { code },
       });
 
-      if (!exists) {
-        isUnique = true;
-      }
+      if (!exists) isUnique = true;
       attempts++;
     }
 
     if (!isUnique) {
-      return {
-        success: false,
-        error: "Failed to generate unique referral code",
-      };
+      return { success: false, error: "Failed to generate unique referral code" };
     }
 
-    // Create referral code
     const referralCode = await prisma.referralCode.create({
       data: {
         tenantId,
         referrerId: customerId,
-        code: code!,
+        code,
         isActive: true,
         validFrom: new Date(),
         referrerRewardType: "POINTS",
-        referrerRewardValue: 100, // Default: 100 points
+        referrerRewardValue: 100,
         referredRewardType: "POINTS",
-        referredRewardValue: 50, // Default: 50 points
+        referredRewardValue: 50,
       },
     });
 
-    return {
-      success: true,
-      referralCode: referralCode.code,
-    };
+    return { success: true, referralCode: referralCode.code };
   } catch (error: any) {
     console.error("Referral code generation error:", error);
     return {
       success: false,
-      error: error.message || "Referral code generation failed",
+      error: error?.message || "Referral code generation failed",
     };
   }
 }
@@ -106,119 +89,103 @@ export async function processReferral(
   tenantId: number = 1
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Find referral code
     const code = await prisma.referralCode.findUnique({
       where: { code: referralCode },
-      include: {
-        referrer: true,
-      },
+      include: { referrer: true },
     });
 
     if (!code || !code.isActive) {
-      return {
-        success: false,
-        error: "Invalid or inactive referral code",
-      };
+      return { success: false, error: "Invalid or inactive referral code" };
     }
 
-    // Check if customer is trying to refer themselves
+    // ReferralCode is tenant-scoped in your schema
+    if (code.tenantId !== tenantId) {
+      return { success: false, error: "Referral code does not match tenant" };
+    }
+
     if (code.referrerId === newCustomerId) {
-      return {
-        success: false,
-        error: "Cannot use your own referral code",
-      };
+      return { success: false, error: "Cannot use your own referral code" };
     }
 
-    // Check if referral already exists
+    // Referral model appears NOT tenant-scoped (no tenantId), so we don't filter by tenantId here.
     const existingReferral = await prisma.referral.findFirst({
       where: {
-        referrerId: code.customerId,
+        referrerId: code.referrerId,
         referredCustomerId: newCustomerId,
-        tenantId,
       },
     });
 
     if (existingReferral) {
-      return {
-        success: false,
-        error: "Referral already processed",
-      };
+      return { success: false, error: "Referral already processed" };
     }
 
-    // Create referral record
     await prisma.referral.create({
       data: {
-        tenantId,
         referrerId: code.referrerId,
         referredCustomerId: newCustomerId,
         referralCodeId: code.id,
-        status: "PENDING", // Will be confirmed after first purchase
+        status: "PENDING",
       },
     });
 
-    return {
-      success: true,
-    };
+    return { success: true };
   } catch (error: any) {
     console.error("Referral processing error:", error);
-    return {
-      success: false,
-      error: error.message || "Referral processing failed",
-    };
+    return { success: false, error: error?.message || "Referral processing failed" };
   }
 }
 
 /**
  * Confirm referral (after first purchase)
+ *
+ * Your Referral Prisma model does NOT have:
+ * - tenantId
+ * - firstPurchaseAmountPaise
+ * - confirmedAt
+ *
+ * So we only update status to CONFIRMED.
  */
 export async function confirmReferral(
   referredCustomerId: number,
-  firstPurchaseAmountPaise: number,
+  firstPurchaseAmountPaise: number, // kept for API compatibility
   tenantId: number = 1
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    // Find pending referral
     const referral = await prisma.referral.findFirst({
       where: {
         referredCustomerId,
-        tenantId,
         status: "PENDING",
       },
       include: {
-        referrer: true,
         referralCode: true,
       },
     });
 
     if (!referral) {
-      return {
-        success: false,
-        error: "No pending referral found",
-      };
+      return { success: false, error: "No pending referral found" };
     }
 
-    // Update referral status
+    // Still enforce tenant via referralCode
+    if (referral.referralCode?.tenantId !== tenantId) {
+      return { success: false, error: "Referral does not match tenant" };
+    }
+
     await prisma.referral.update({
       where: { id: referral.id },
       data: {
         status: "CONFIRMED",
-        firstPurchaseAmountPaise,
-        confirmedAt: new Date(),
       },
     });
 
-    // Award rewards (points or cashback)
-    // This would integrate with loyalty system
-    // For now, just mark as confirmed
+    // Not stored (schema doesn't support it yet)
+    void firstPurchaseAmountPaise;
 
-    return {
-      success: true,
-    };
+    return { success: true };
   } catch (error: any) {
     console.error("Referral confirmation error:", error);
     return {
       success: false,
-      error: error.message || "Referral confirmation failed",
+      error: error?.message || "Referral confirmation failed",
     };
   }
 }
@@ -236,16 +203,18 @@ export async function getReferralAnalytics(
   totalRewardsPaise: number;
 }> {
   const referrals = await prisma.referral.findMany({
-    where: {
-      referrerId: customerId,
-      tenantId,
-    },
+    where: { referrerId: customerId },
+    include: { referralCode: true },
   });
 
+  const tenantReferrals = referrals.filter(
+    (r: any) => r.referralCode?.tenantId === tenantId
+  );
+
   return {
-    totalReferrals: referrals.length,
-    confirmedReferrals: referrals.filter((r) => r.status === "CONFIRMED").length,
-    pendingReferrals: referrals.filter((r) => r.status === "PENDING").length,
-    totalRewardsPaise: 0, // Would calculate from rewards system
+    totalReferrals: tenantReferrals.length,
+    confirmedReferrals: tenantReferrals.filter((r: any) => r.status === "CONFIRMED").length,
+    pendingReferrals: tenantReferrals.filter((r: any) => r.status === "PENDING").length,
+    totalRewardsPaise: 0,
   };
 }

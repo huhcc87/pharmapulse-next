@@ -28,6 +28,9 @@ export default function PaymentModal({
   const [walletProvider, setWalletProvider] = useState("");
   const [isMarkingPaid, setIsMarkingPaid] = useState(false);
 
+  // ✅ FIX: Razorpay processing state was used but never defined
+  const [isProcessingRazorpay, setIsProcessingRazorpay] = useState(false);
+
   if (!isOpen) return null;
 
   const totalAmount = totalPaise / 100;
@@ -36,7 +39,7 @@ export default function PaymentModal({
 
   const handleAddSplit = () => {
     if (!selectedMethod) return;
-    
+
     // Parse the split amount input, or use remaining if empty
     let amountToAdd = remaining;
     if (splitAmountInput.trim()) {
@@ -47,7 +50,7 @@ export default function PaymentModal({
         amountToAdd = Math.min(amountToAdd, remaining);
       }
     }
-    
+
     if (amountToAdd > 0 && amountToAdd <= remaining) {
       setSplitPayments([...splitPayments, { method: selectedMethod, amountPaise: amountToAdd }]);
       setSplitAmountInput(""); // Clear input after adding
@@ -163,7 +166,7 @@ export default function PaymentModal({
 
           if (splitPayments.length > 0) {
             // Add to split payments
-            setSplitPayments([...splitPayments, razorpayPayment]);
+            setSplitPayments([...splitPayments, razorpayPayment as any]);
             setIsProcessingRazorpay(false);
           } else {
             // Direct confirm
@@ -342,7 +345,9 @@ export default function PaymentModal({
                   disabled={isProcessingRazorpay || remaining <= 0}
                   className="w-full px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
                 >
-                  {isProcessingRazorpay ? "Processing..." : `Pay ₹${((remaining > 0 ? remaining : totalPaise) / 100).toFixed(2)} via Razorpay`}
+                  {isProcessingRazorpay
+                    ? "Processing..."
+                    : `Pay ₹${((remaining > 0 ? remaining : totalPaise) / 100).toFixed(2)} via Razorpay`}
                 </button>
               </div>
               <p className="text-xs text-gray-500">
@@ -421,8 +426,9 @@ export default function PaymentModal({
                             if (!isNaN(newAmount) && newAmount > 0) {
                               const newAmountPaise = Math.round(newAmount * 100);
                               // Ensure total doesn't exceed totalPaise
-                              const otherTotal = splitPayments.reduce((sum, p, i) => 
-                                i !== idx ? sum + p.amountPaise : sum, 0
+                              const otherTotal = splitPayments.reduce(
+                                (sum, p, i) => (i !== idx ? sum + p.amountPaise : sum),
+                                0
                               );
                               const maxAllowed = totalPaise - otherTotal;
                               handleUpdateSplitAmount(idx, Math.min(newAmountPaise, maxAllowed));
@@ -460,13 +466,15 @@ export default function PaymentModal({
 
             {/* Split Total Summary */}
             {splitTotal > 0 && (
-              <div className={`mt-3 p-2 rounded-lg text-sm font-medium ${
-                remaining === 0 
-                  ? 'bg-green-50 text-green-700 border border-green-200' 
-                  : remaining > 0 
-                    ? 'bg-orange-50 text-orange-700 border border-orange-200' 
-                    : 'bg-gray-50 text-gray-600'
-              }`}>
+              <div
+                className={`mt-3 p-2 rounded-lg text-sm font-medium ${
+                  remaining === 0
+                    ? "bg-green-50 text-green-700 border border-green-200"
+                    : remaining > 0
+                    ? "bg-orange-50 text-orange-700 border border-orange-200"
+                    : "bg-gray-50 text-gray-600"
+                }`}
+              >
                 <div className="flex justify-between items-center">
                   <span>Split Total:</span>
                   <span className="font-bold">
@@ -505,5 +513,3 @@ export default function PaymentModal({
     </div>
   );
 }
-
-

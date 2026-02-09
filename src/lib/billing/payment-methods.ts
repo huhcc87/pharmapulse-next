@@ -1,9 +1,8 @@
+// src/lib/billing/payment-methods.ts
 // Advanced Payment Methods Management
 // Support for UPI, NEFT, RTGS, IMPS, Card, Wallet
 
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
 
 export interface PaymentMethodData {
   methodType: "UPI" | "NEFT" | "RTGS" | "IMPS" | "CARD" | "WALLET";
@@ -26,37 +25,65 @@ export interface PaymentMethodData {
 }
 
 /**
+ * Your current Prisma schema does NOT expose `prisma.paymentMethod`.
+ * This file is therefore written to:
+ *  - compile cleanly even without that model
+ *  - degrade gracefully at runtime
+ *
+ * If/when you add a PaymentMethod model to schema.prisma, this will start using it automatically.
+ */
+type PaymentMethodDelegate = {
+  findMany: (args: any) => Promise<any[]>;
+  create: (args: any) => Promise<any>;
+  update: (args: any) => Promise<any>;
+  updateMany: (args: any) => Promise<any>;
+  delete: (args: any) => Promise<any>;
+};
+
+function getPaymentMethodDelegate(): PaymentMethodDelegate | null {
+  const anyPrisma = prisma as any;
+  return (anyPrisma?.paymentMethod ?? null) as PaymentMethodDelegate | null;
+}
+
+function requirePaymentMethodModel(): PaymentMethodDelegate {
+  const delegate = getPaymentMethodDelegate();
+  if (!delegate) {
+    throw new Error(
+      "PaymentMethod model is not available in Prisma schema. Add `model PaymentMethod` (and run prisma generate) to enable payment methods."
+    );
+  }
+  return delegate;
+}
+
+/**
  * Create payment method
  */
 export async function createPaymentMethod(
   tenantId: string,
   data: PaymentMethodData
 ): Promise<any> {
+  const paymentMethod = requirePaymentMethodModel();
+
   try {
     // If setting as default, unset other defaults
     if (data.isDefault) {
-      await prisma.paymentMethod.updateMany({
-        where: {
-          tenantId,
-          isDefault: true,
-        },
-        data: {
-          isDefault: false,
-        },
+      await paymentMethod.updateMany({
+        where: { tenantId, isDefault: true },
+        data: { isDefault: false },
       });
     }
 
     // Create payment method
-    const paymentMethod = await prisma.paymentMethod.create({
+    return await paymentMethod.create({
       data: {
         tenantId,
         methodType: data.methodType,
-        provider: data.provider || null,
+        provider: data.provider ?? null,
         accountDetails: data.accountDetails
           ? JSON.parse(JSON.stringify(data.accountDetails))
           : null,
-        isDefault: data.isDefault || false,
-        isAutoPayment: data.isAutoPayment || false,
+        isDefault: data.isDefault ?? false,
+        isAutoPayment: data.isAutoPayment ?? false,
         autoPaymentRules: data.autoPaymentRules
           ? JSON.parse(JSON.stringify(data.autoPaymentRules))
           : null,
@@ -64,8 +91,6 @@ export async function createPaymentMethod(
         verifiedAt: null,
       },
     });
-
-    return paymentMethod;
   } catch (error: any) {
     console.error("Create payment method error:", error);
     throw error;
@@ -80,41 +105,41 @@ export async function updatePaymentMethod(
   methodId: string,
   data: Partial<PaymentMethodData>
 ): Promise<any> {
+  const paymentMethod = requirePaymentMethodModel();
+
   try {
     // If setting as default, unset other defaults
     if (data.isDefault) {
-      await prisma.paymentMethod.updateMany({
+      await paymentMethod.updateMany({
         where: {
           tenantId,
           isDefault: true,
-          id: {
-            not: methodId,
-          },
+          id: { not: methodId },
         },
-        data: {
-          isDefault: false,
-        },
+        data: { isDefault: false },
       });
     }
 
-    // Update payment method
     const updateData: any = {};
     if (data.methodType) updateData.methodType = data.methodType;
-    if (data.provider !== undefined) updateData.provider = data.provider;
-    if (data.accountDetails) updateData.accountDetails = JSON.parse(JSON.stringify(data.accountDetails));
+    if (data.provider !== undefined) updateData.provider = data.provider ?? null;
+    if (data.accountDetails !== undefined) {
+      updateData.accountDetails = data.accountDetails
+        ? JSON.parse(JSON.stringify(data.accountDetails))
+        : null;
+    }
     if (data.isDefault !== undefined) updateData.isDefault = data.isDefault;
     if (data.isAutoPayment !== undefined) updateData.isAutoPayment = data.isAutoPayment;
-    if (data.autoPaymentRules) updateData.autoPaymentRules = JSON.parse(JSON.stringify(data.autoPaymentRules));
+    if (data.autoPaymentRules !== undefined) {
+      updateData.autoPaymentRules = data.autoPaymentRules
+        ? JSON.parse(JSON.stringify(data.autoPaymentRules))
+        : null;
+    }
 
-    const paymentMethod = await prisma.paymentMethod.update({
-      where: {
-        id: methodId,
-        tenantId,
-      },
+    return await paymentMethod.update({
+      where: { id: methodId, tenantId },
       data: updateData,
     });
-
-    return paymentMethod;
   } catch (error: any) {
     console.error("Update payment method error:", error);
     throw error;
@@ -128,12 +153,11 @@ export async function deletePaymentMethod(
   tenantId: string,
   methodId: string
 ): Promise<void> {
+  const paymentMethod = requirePaymentMethodModel();
+
   try {
-    await prisma.paymentMethod.delete({
-      where: {
-        id: methodId,
-        tenantId,
-      },
+    await paymentMethod.delete({
+      where: { id: methodId, tenantId },
     });
   } catch (error: any) {
     console.error("Delete payment method error:", error);
@@ -143,6 +167,8 @@ export async function deletePaymentMethod(
 
 /**
  * Get payment methods
+ *
+ * If model is missing, return [] (so UI can still load).
  */
 export async function getPaymentMethods(
   tenantId: string,
@@ -152,27 +178,19 @@ export async function getPaymentMethods(
     isDefault?: boolean;
   }
 ): Promise<any[]> {
+  const paymentMethod = getPaymentMethodDelegate();
+  if (!paymentMethod) return [];
+
   try {
     const where: any = { tenantId };
-    if (filters?.methodType) {
-      where.methodType = filters.methodType;
-    }
-    if (filters?.isActive !== undefined) {
-      where.isActive = filters.isActive;
-    }
-    if (filters?.isDefault !== undefined) {
-      where.isDefault = filters.isDefault;
-    }
+    if (filters?.methodType) where.methodType = filters.methodType;
+    if (filters?.isActive !== undefined) where.isActive = filters.isActive;
+    if (filters?.isDefault !== undefined) where.isDefault = filters.isDefault;
 
-    const paymentMethods = await prisma.paymentMethod.findMany({
+    return await paymentMethod.findMany({
       where,
-      orderBy: [
-        { isDefault: "desc" },
-        { createdAt: "desc" },
-      ],
+      orderBy: [{ isDefault: "desc" }, { createdAt: "desc" }],
     });
-
-    return paymentMethods;
   } catch (error: any) {
     console.error("Get payment methods error:", error);
     throw error;
@@ -186,24 +204,13 @@ export async function verifyPaymentMethod(
   tenantId: string,
   methodId: string
 ): Promise<any> {
+  const paymentMethod = requirePaymentMethodModel();
+
   try {
-    // In a real implementation, this would:
-    // 1. Send verification code to account
-    // 2. Verify the code
-    // 3. Mark as verified
-
-    // For now, just mark as verified
-    const paymentMethod = await prisma.paymentMethod.update({
-      where: {
-        id: methodId,
-        tenantId,
-      },
-      data: {
-        verifiedAt: new Date(),
-      },
+    return await paymentMethod.update({
+      where: { id: methodId, tenantId },
+      data: { verifiedAt: new Date() },
     });
-
-    return paymentMethod;
   } catch (error: any) {
     console.error("Verify payment method error:", error);
     throw error;
@@ -217,30 +224,18 @@ export async function setDefaultPaymentMethod(
   tenantId: string,
   methodId: string
 ): Promise<any> {
+  const paymentMethod = requirePaymentMethodModel();
+
   try {
-    // Unset all defaults
-    await prisma.paymentMethod.updateMany({
-      where: {
-        tenantId,
-        isDefault: true,
-      },
-      data: {
-        isDefault: false,
-      },
+    await paymentMethod.updateMany({
+      where: { tenantId, isDefault: true },
+      data: { isDefault: false },
     });
 
-    // Set new default
-    const paymentMethod = await prisma.paymentMethod.update({
-      where: {
-        id: methodId,
-        tenantId,
-      },
-      data: {
-        isDefault: true,
-      },
+    return await paymentMethod.update({
+      where: { id: methodId, tenantId },
+      data: { isDefault: true },
     });
-
-    return paymentMethod;
   } catch (error: any) {
     console.error("Set default payment method error:", error);
     throw error;

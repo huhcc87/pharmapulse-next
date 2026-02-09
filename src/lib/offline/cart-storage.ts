@@ -1,39 +1,47 @@
 // Cart storage for offline cart persistence
 // Saves cart to localStorage for restoration
 
-const CART_STORAGE_KEY = 'offline_cart_v1';
-const CART_META_KEY = 'offline_cart_meta_v1';
+const CART_STORAGE_KEY = "offline_cart_v1";
+const CART_META_KEY = "offline_cart_meta_v1";
 
-interface CartMeta {
+export interface CartMeta {
   savedAt: number;
   isOffline: boolean;
   customerId?: number | null;
 }
 
+function isBrowser(): boolean {
+  return typeof window !== "undefined" && typeof window.localStorage !== "undefined";
+}
+
 /**
  * Save cart to localStorage
  */
-export async function saveCartToStorage(items: any[], customerId?: number | null): Promise<void> {
-  if (typeof localStorage === 'undefined') {
-    return; // SSR
-  }
+export async function saveCartToStorage(
+  items: any[],
+  customerId?: number | null
+): Promise<void> {
+  if (!isBrowser()) return; // SSR / non-browser
+
+  // IMPORTANT: meta must be defined OUTSIDE try so it's in scope for retry too
+  const meta: CartMeta = {
+    savedAt: Date.now(),
+    isOffline: typeof navigator !== "undefined" ? !navigator.onLine : false,
+    customerId: customerId ?? null,
+  };
 
   try {
-    const meta: CartMeta = {
-      savedAt: Date.now(),
-      isOffline: !navigator.onLine,
-      customerId: customerId || null,
-    };
-    
-    localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(items));
+    localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(items ?? []));
     localStorage.setItem(CART_META_KEY, JSON.stringify(meta));
   } catch (error) {
     console.error("Failed to save cart to storage:", error);
-    // Storage might be full - try clearing old data
+
+    // Storage might be full - try clearing old data then save again
     try {
       localStorage.removeItem(CART_STORAGE_KEY);
       localStorage.removeItem(CART_META_KEY);
-      localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(items));
+
+      localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(items ?? []));
       localStorage.setItem(CART_META_KEY, JSON.stringify(meta));
     } catch (retryError) {
       console.error("Failed to save cart after retry:", retryError);
@@ -44,19 +52,20 @@ export async function saveCartToStorage(items: any[], customerId?: number | null
 /**
  * Load cart from localStorage
  */
-export async function loadCartFromStorage(): Promise<{ items: any[]; meta: CartMeta | null }> {
-  if (typeof localStorage === 'undefined') {
-    return { items: [], meta: null };
-  }
+export async function loadCartFromStorage(): Promise<{
+  items: any[];
+  meta: CartMeta | null;
+}> {
+  if (!isBrowser()) return { items: [], meta: null };
 
   try {
     const itemsJson = localStorage.getItem(CART_STORAGE_KEY);
     const metaJson = localStorage.getItem(CART_META_KEY);
-    
-    const items = itemsJson ? JSON.parse(itemsJson) : [];
-    const meta = metaJson ? JSON.parse(metaJson) : null;
-    
-    return { items: Array.isArray(items) ? items : [], meta };
+
+    const parsedItems = itemsJson ? JSON.parse(itemsJson) : [];
+    const parsedMeta = metaJson ? (JSON.parse(metaJson) as CartMeta) : null;
+
+    return { items: Array.isArray(parsedItems) ? parsedItems : [], meta: parsedMeta };
   } catch (error) {
     console.error("Failed to load cart from storage:", error);
     return { items: [], meta: null };
@@ -67,9 +76,7 @@ export async function loadCartFromStorage(): Promise<{ items: any[]; meta: CartM
  * Clear cart from storage
  */
 export async function clearCartStorage(): Promise<void> {
-  if (typeof localStorage === 'undefined') {
-    return;
-  }
+  if (!isBrowser()) return;
 
   try {
     localStorage.removeItem(CART_STORAGE_KEY);
@@ -83,14 +90,11 @@ export async function clearCartStorage(): Promise<void> {
  * Check if there's a saved cart
  */
 export async function hasSavedCart(): Promise<boolean> {
-  if (typeof localStorage === 'undefined') {
-    return false;
-  }
+  if (!isBrowser()) return false;
 
   try {
-    const itemsJson = localStorage.getItem(CART_STORAGE_KEY);
-    return !!itemsJson;
-  } catch (error) {
+    return !!localStorage.getItem(CART_STORAGE_KEY);
+  } catch {
     return false;
   }
 }
@@ -99,14 +103,12 @@ export async function hasSavedCart(): Promise<boolean> {
  * Get cart metadata
  */
 export async function getCartMeta(): Promise<CartMeta | null> {
-  if (typeof localStorage === 'undefined') {
-    return null;
-  }
+  if (!isBrowser()) return null;
 
   try {
     const metaJson = localStorage.getItem(CART_META_KEY);
-    return metaJson ? JSON.parse(metaJson) : null;
-  } catch (error) {
+    return metaJson ? (JSON.parse(metaJson) as CartMeta) : null;
+  } catch {
     return null;
   }
 }

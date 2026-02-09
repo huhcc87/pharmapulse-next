@@ -1,8 +1,7 @@
 // Stock health indicators for inventory
-import { getExpiryWarning, calculateDaysToExpiry } from "./fefo";
+import { getExpiryWarning } from "./fefo";
 
 export type StockStatus = "IN_STOCK" | "LOW_STOCK" | "OUT_OF_STOCK";
-
 export type ExpiryStatus = "SAFE" | "NEAR" | "SOON" | "CRITICAL" | "EXPIRED";
 
 export interface StockIndicator {
@@ -38,30 +37,32 @@ export function getStockStatus(
       lowStockThreshold,
       message: "Out of stock",
     };
-  } else if (quantity <= lowStockThreshold) {
+  }
+
+  if (quantity <= lowStockThreshold) {
     return {
       status: "LOW_STOCK",
       quantity,
       lowStockThreshold,
       message: `Low stock (${quantity} remaining)`,
     };
-  } else {
-    return {
-      status: "IN_STOCK",
-      quantity,
-      lowStockThreshold,
-      message: "In stock",
-    };
   }
+
+  return {
+    status: "IN_STOCK",
+    quantity,
+    lowStockThreshold,
+    message: "In stock",
+  };
 }
 
 /**
  * Get expiry indicator for batch
  */
-export function getExpiryIndicator(expiryDate: Date | null): ExpiryIndicator | null {
-  if (!expiryDate) {
-    return null;
-  }
+export function getExpiryIndicator(
+  expiryDate: Date | null
+): ExpiryIndicator | null {
+  if (!expiryDate) return null;
 
   const warning = getExpiryWarning(expiryDate);
   return {
@@ -80,12 +81,14 @@ export function getInventoryHealth(
   lowStockThreshold: number = 5
 ): InventoryHealth {
   const stock = getStockStatus(quantity, lowStockThreshold);
-  const expiry = expiryDate ? getExpiryIndicator(expiryDate) : null;
+  const expiry = getExpiryIndicator(expiryDate);
 
+  // ✅ Always boolean (no boolean|null)
   const needsAttention =
     stock.status === "OUT_OF_STOCK" ||
     stock.status === "LOW_STOCK" ||
-    (expiry && (expiry.status === "CRITICAL" || expiry.status === "EXPIRED"));
+    expiry?.status === "CRITICAL" ||
+    expiry?.status === "EXPIRED";
 
   return {
     stock,
@@ -105,6 +108,8 @@ export function getStockIcon(status: StockStatus): string {
       return "🟡";
     case "OUT_OF_STOCK":
       return "🔴";
+    default:
+      return "🟢";
   }
 }
 
@@ -123,5 +128,7 @@ export function getExpiryIcon(status: ExpiryStatus): string {
       return "🚨";
     case "EXPIRED":
       return "❌";
+    default:
+      return "";
   }
 }

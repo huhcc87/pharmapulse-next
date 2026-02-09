@@ -27,26 +27,21 @@ export async function createLicensePool(
   tenantId: string,
   data: LicensePoolData
 ): Promise<any> {
-  try {
-    const pool = await prisma.licensePool.create({
-      data: {
-        tenantId,
-        name: data.name,
-        description: data.description || null,
-        totalLicenses: data.totalLicenses,
-        allocatedLicenses: 0,
-        availableLicenses: data.totalLicenses,
-        autoAllocate: data.autoAllocate || false,
-        allowTransfer: data.allowTransfer !== false,
-        isActive: true,
-      },
-    });
+  const pool = await prisma.licensePool.create({
+    data: {
+      tenantId,
+      name: data.name,
+      description: data.description ?? null,
+      totalLicenses: data.totalLicenses,
+      allocatedLicenses: 0,
+      availableLicenses: data.totalLicenses,
+      autoAllocate: data.autoAllocate ?? false,
+      allowTransfer: data.allowTransfer ?? true,
+      isActive: true,
+    },
+  });
 
-    return pool;
-  } catch (error: any) {
-    console.error("Create license pool error:", error);
-    throw error;
-  }
+  return pool;
 }
 
 /**
@@ -60,45 +55,40 @@ export async function allocateLicense(
     expiresAt?: Date;
   }
 ): Promise<any> {
-  try {
-    // Check pool availability
-    const pool = await prisma.licensePool.findUnique({
-      where: { id: poolId },
-    });
+  // Check pool availability
+  const pool = await prisma.licensePool.findUnique({
+    where: { id: poolId },
+    select: {
+      id: true,
+      availableLicenses: true,
+      allocatedLicenses: true,
+    },
+  });
 
-    if (!pool) {
-      throw new Error("License pool not found");
-    }
+  if (!pool) throw new Error("License pool not found");
+  if (pool.availableLicenses <= 0) throw new Error("No available licenses in pool");
 
-    if (pool.availableLicenses <= 0) {
-      throw new Error("No available licenses in pool");
-    }
+  // Create allocation
+  const allocation = await prisma.licenseAllocation.create({
+    data: {
+      poolId,
+      licenseId: data.licenseId,
+      allocatedTo: data.allocatedTo ?? null,
+      expiresAt: data.expiresAt ?? null,
+      status: "ACTIVE",
+    },
+  });
 
-    // Create allocation
-    const allocation = await prisma.licenseAllocation.create({
-      data: {
-        poolId,
-        licenseId: data.licenseId,
-        allocatedTo: data.allocatedTo || null,
-        expiresAt: data.expiresAt || null,
-        status: "ACTIVE",
-      },
-    });
+  // Update pool
+  await prisma.licensePool.update({
+    where: { id: poolId },
+    data: {
+      allocatedLicenses: pool.allocatedLicenses + 1,
+      availableLicenses: pool.availableLicenses - 1,
+    },
+  });
 
-    // Update pool
-    await prisma.licensePool.update({
-      where: { id: poolId },
-      data: {
-        allocatedLicenses: pool.allocatedLicenses + 1,
-        availableLicenses: pool.availableLicenses - 1,
-      },
-    });
-
-    return allocation;
-  } catch (error: any) {
-    console.error("Allocate license error:", error);
-    throw error;
-  }
+  return allocation;
 }
 
 /**
@@ -108,46 +98,50 @@ export async function revokeLicenseAllocation(
   allocationId: string,
   reason?: string
 ): Promise<void> {
-  try {
-    const allocation = await prisma.licenseAllocation.findUnique({
-      where: { id: allocationId },
-      include: {
-        // Note: Would need relation in schema
-      },
-    });
+  // IMPORTANT: No `include: {}` here (it causes "never" error if no relations exist)
+  const allocation = await prisma.licenseAllocation.findUnique({
+    where: { id: allocationId },
+    select: {
+      id: true,
+      poolId: true,
+      status: true,
+    },
+  });
 
-    if (!allocation) {
-      throw new Error("License allocation not found");
-    }
+  if (!allocation) throw new Error("License allocation not found");
 
-    // Update allocation
-    await prisma.licenseAllocation.update({
-      where: { id: allocationId },
-      data: {
-        status: "REVOKED",
-        revokedAt: new Date(),
-        revocationReason: reason || null,
-      },
-    });
+  // If already revoked, no-op
+  if (allocation.status === "REVOKED") return;
 
-    // Update pool
-    const pool = await prisma.licensePool.findUnique({
-      where: { id: allocation.poolId },
-    });
+  // Update allocation
+  await prisma.licenseAllocation.update({
+    where: { id: allocationId },
+    data: {
+      status: "REVOKED",
+      revokedAt: new Date(),
+      revocationReason: reason ?? null,
+    },
+  });
 
-    if (pool) {
-      await prisma.licensePool.update({
-        where: { id: pool.id },
-        data: {
-          allocatedLicenses: Math.max(0, pool.allocatedLicenses - 1),
-          availableLicenses: pool.availableLicenses + 1,
-        },
-      });
-    }
-  } catch (error: any) {
-    console.error("Revoke license allocation error:", error);
-    throw error;
-  }
+  // Update pool counters safely
+  const pool = await prisma.licensePool.findUnique({
+    where: { id: allocation.poolId },
+    select: {
+      id: true,
+      allocatedLicenses: true,
+      availableLicenses: true,
+    },
+  });
+
+  if (!pool) return;
+
+  await prisma.licensePool.update({
+    where: { id: pool.id },
+    data: {
+      allocatedLicenses: Math.max(0, pool.allocatedLicenses - 1),
+      availableLicenses: pool.availableLicenses + 1,
+    },
+  });
 }
 
 /**
@@ -157,37 +151,33 @@ export async function transferLicense(
   fromAllocationId: string,
   toAllocatedTo: string
 ): Promise<any> {
-  try {
-    const allocation = await prisma.licenseAllocation.findUnique({
-      where: { id: fromAllocationId },
-    });
+  const allocation = await prisma.licenseAllocation.findUnique({
+    where: { id: fromAllocationId },
+    select: {
+      id: true,
+      poolId: true,
+    },
+  });
 
-    if (!allocation) {
-      throw new Error("License allocation not found");
-    }
+  if (!allocation) throw new Error("License allocation not found");
 
-    // Check if transfer is allowed
-    const pool = await prisma.licensePool.findUnique({
-      where: { id: allocation.poolId },
-    });
+  // Check if transfer is allowed
+  const pool = await prisma.licensePool.findUnique({
+    where: { id: allocation.poolId },
+    select: { allowTransfer: true },
+  });
 
-    if (!pool || !pool.allowTransfer) {
-      throw new Error("License transfer not allowed for this pool");
-    }
-
-    // Update allocation
-    const updated = await prisma.licenseAllocation.update({
-      where: { id: fromAllocationId },
-      data: {
-        allocatedTo: toAllocatedTo,
-      },
-    });
-
-    return updated;
-  } catch (error: any) {
-    console.error("Transfer license error:", error);
-    throw error;
+  if (!pool || !pool.allowTransfer) {
+    throw new Error("License transfer not allowed for this pool");
   }
+
+  // Update allocation
+  const updated = await prisma.licenseAllocation.update({
+    where: { id: fromAllocationId },
+    data: { allocatedTo: toAllocatedTo },
+  });
+
+  return updated;
 }
 
 /**
@@ -201,36 +191,30 @@ export async function getLicensePoolStatus(
   availableLicenses: number;
   allocations: any[];
 }> {
-  try {
-    const pool = await prisma.licensePool.findUnique({
-      where: { id: poolId },
-    });
+  const pool = await prisma.licensePool.findUnique({
+    where: { id: poolId },
+  });
 
-    if (!pool) {
-      throw new Error("License pool not found");
-    }
+  if (!pool) throw new Error("License pool not found");
 
-    const allocations = await prisma.licenseAllocation.findMany({
-      where: {
-        poolId,
-        status: "ACTIVE",
-      },
-    });
+  const allocations = await prisma.licenseAllocation.findMany({
+    where: {
+      poolId,
+      status: "ACTIVE",
+    },
+    orderBy: { allocatedAt: "desc" },
+  });
 
-    return {
-      totalLicenses: pool.totalLicenses,
-      allocatedLicenses: pool.allocatedLicenses,
-      availableLicenses: pool.availableLicenses,
-      allocations: allocations.map((a) => ({
-        id: a.id,
-        licenseId: a.licenseId,
-        allocatedTo: a.allocatedTo,
-        allocatedAt: a.allocatedAt,
-        expiresAt: a.expiresAt,
-      })),
-    };
-  } catch (error: any) {
-    console.error("Get license pool status error:", error);
-    throw error;
-  }
+  return {
+    totalLicenses: pool.totalLicenses,
+    allocatedLicenses: pool.allocatedLicenses,
+    availableLicenses: pool.availableLicenses,
+    allocations: allocations.map((a) => ({
+      id: a.id,
+      licenseId: a.licenseId,
+      allocatedTo: a.allocatedTo,
+      allocatedAt: a.allocatedAt,
+      expiresAt: a.expiresAt,
+    })),
+  };
 }

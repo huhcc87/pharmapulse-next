@@ -1,224 +1,309 @@
-// Advanced Analytics & Report Builder
-// Custom report builder with drag-and-drop functionality
+/**
+ * Analytics Step-Up Authentication
+ *
+ * Requires extra verification to access Analytics Dashboard.
+ * Even if session is stolen, Analytics requires step-up.
+ */
 
-export interface ReportField {
-  id: string;
-  name: string;
-  type: 'metric' | 'dimension' | 'date' | 'filter';
-  dataType: 'number' | 'string' | 'date' | 'boolean';
-  aggregation?: 'sum' | 'avg' | 'count' | 'min' | 'max';
-  format?: string;
+import { prisma } from "@/lib/prisma";
+import { generateAccessToken } from "@/lib/auth/jwt";
+import crypto from "crypto";
+import { StepUpMethod } from "@prisma/client";
+
+const ANALYTICS_UNLOCK_DURATION_HOURS = 24;
+const ANALYTICS_UNLOCK_DURATION_SECONDS = ANALYTICS_UNLOCK_DURATION_HOURS * 60 * 60;
+
+const CHALLENGE_TTL_MINUTES = 10;
+
+const MAX_FAILED_ATTEMPTS = 5;
+const LOCKOUT_DURATION_MINUTES = 30;
+
+export interface StepUpChallenge {
+  challengeId: string;
+  method: StepUpMethod;
+  expiresAt: Date;
 }
 
-export interface ReportFilter {
-  field: string;
-  operator: 'equals' | 'not_equals' | 'greater_than' | 'less_than' | 'contains' | 'in' | 'between';
-  value: any;
-}
-
-export interface ReportConfig {
-  id?: string;
-  name: string;
-  description?: string;
-  fields: ReportField[];
-  filters: ReportFilter[];
-  groupBy?: string[];
-  orderBy?: Array<{ field: string; direction: 'asc' | 'desc' }>;
-  dateRange?: {
-    from: Date;
-    to: Date;
-  };
-  format: 'table' | 'chart' | 'both';
-  chartType?: 'line' | 'bar' | 'pie' | 'area' | 'scatter';
-}
-
-export interface ReportResult {
-  data: any[];
-  summary?: {
-    total?: number;
-    average?: number;
-    count?: number;
-  };
-  chartData?: {
-    labels: string[];
-    datasets: Array<{
-      label: string;
-      data: number[];
-      backgroundColor?: string;
-    }>;
-  };
+export interface VerifyAnalyticsUnlockResult {
+  ok: boolean;
+  reason?:
+    | "missing_token"
+    | "invalid_token"
+    | "expired"
+    | "wrong_purpose"
+    | "not_unlocked"
+    | "unknown";
+  payload?: any;
 }
 
 /**
- * Build custom report based on configuration
+ * Normalize incoming method (string/UI) into Prisma StepUpMethod enum.
  */
-export async function buildCustomReport(
-  config: ReportConfig,
-  tenantId: number = 1
-): Promise<ReportResult> {
-  // This would integrate with your database queries
-  // For now, return mock structure
-  
-  const result: ReportResult = {
-    data: [],
-    summary: {},
-  };
+function normalizeStepUpMethod(input: StepUpMethod | string): StepUpMethod {
+  if (typeof input !== "string") return input;
 
-  // Build query based on config
-  const query = buildQuery(config);
-  
-  // Execute query (would use Prisma)
-  // const data = await executeQuery(query, tenantId);
-  
-  // Format results
-  if (config.format === 'chart' || config.format === 'both') {
-    result.chartData = formatChartData(result.data, config);
+  const v = input.trim().toLowerCase();
+  const enumValues = Object.values(StepUpMethod) as string[];
+
+  const match = (candidates: string[]) =>
+    enumValues.find((ev) =>
+      candidates.some((c) => ev.toLowerCase() === c.toLowerCase())
+    ) as StepUpMethod | undefined;
+
+  const totp = match(["totp"]);
+  const pin = match(["pin", "analytics_pin"]);
+
+  if (v === "totp" && totp) return totp;
+  if ((v === "pin" || v === "analytics_pin") && pin) return pin;
+
+  const direct = enumValues.find((ev) => ev.toLowerCase() === v);
+  if (direct) return direct as StepUpMethod;
+
+  return (totp ?? (enumValues[0] as StepUpMethod)) as StepUpMethod;
+}
+
+function addMinutes(d: Date, minutes: number) {
+  return new Date(d.getTime() + minutes * 60 * 1000);
+}
+
+function addSeconds(d: Date, seconds: number) {
+  return new Date(d.getTime() + seconds * 1000);
+}
+
+function sha256Hex(input: string) {
+  return crypto.createHash("sha256").update(input).digest("hex");
+}
+
+/**
+ * Check if step-up is required for analytics
+ */
+export async function isAnalyticsStepUpRequired(
+  tenantId: string,
+  userId: string,
+  userRole: string,
+  sessionAgeHours: number,
+  isNewDevice: boolean,
+  ipChanged: boolean
+): Promise<boolean> {
+  if (userRole === "OWNER" || userRole === "owner") {
+    if (sessionAgeHours < 8 && !isNewDevice && !ipChanged) return false;
+  }
+  return true;
+}
+
+/**
+ * Start step-up challenge for analytics
+ */
+export async function startAnalyticsStepUp(
+  tenantId: string,
+  userId: string,
+  method: StepUpMethod | string,
+  ipAddress?: string,
+  userAgent?: string,
+  deviceId?: string
+): Promise<StepUpChallenge> {
+  const normalizedMethod = normalizeStepUpMethod(method);
+
+  const existingLocked = await prisma.stepUpSession.findFirst({
+    where: {
+      tenantId,
+      userId,
+      purpose: "analytics_unlock",
+      lockedUntil: { gt: new Date() },
+    },
+    orderBy: { createdAt: "desc" as any },
+  });
+
+  if (existingLocked?.lockedUntil) {
+    throw new Error(
+      `Step-up authentication is locked. Try again after ${existingLocked.lockedUntil.toISOString()}`
+    );
   }
 
-  return result;
+  const challengeId = crypto.randomBytes(16).toString("hex");
+  const now = new Date();
+  const expiresAt = addMinutes(now, CHALLENGE_TTL_MINUTES);
+
+  await prisma.stepUpSession.create({
+    data: {
+      tenantId,
+      userId,
+      purpose: "analytics_unlock",
+      method: normalizedMethod as any,
+      challengeIdHash: sha256Hex(challengeId) as any,
+      expiresAt: expiresAt as any,
+      failedAttempts: 0 as any,
+      lockedUntil: null as any,
+      ipAddress: ipAddress ?? null,
+      userAgent: userAgent ?? null,
+      deviceId: deviceId ?? null,
+    } as any,
+  });
+
+  return { challengeId, method: normalizedMethod, expiresAt };
 }
 
 /**
- * Build SQL-like query from report config
+ * Complete verification and issue an "analytics unlock" access token.
+ * Your API layer should supply verificationPassed (OTP/TOTP/PIN validation).
  */
-function buildQuery(config: ReportConfig): any {
-  // Convert report config to query structure
-  return {
-    select: config.fields.map((f) => ({
-      field: f.id,
-      aggregation: f.aggregation,
-    })),
-    where: config.filters.map((f) => ({
-      field: f.field,
-      operator: f.operator,
-      value: f.value,
-    })),
-    groupBy: config.groupBy,
-    orderBy: config.orderBy,
-    dateRange: config.dateRange,
-  };
-}
+export async function completeAnalyticsStepUp(
+  tenantId: string,
+  userId: string,
+  challengeId: string,
+  verificationPassed: boolean
+): Promise<{ unlockedUntil: Date; token: string }> {
+  const now = new Date();
+  const challengeHash = sha256Hex(challengeId);
 
-/**
- * Format data for charts
- */
-function formatChartData(data: any[], config: ReportConfig): ReportResult['chartData'] {
-  if (!config.chartType || data.length === 0) {
-    return undefined;
+  const session = await prisma.stepUpSession.findFirst({
+    where: {
+      tenantId,
+      userId,
+      purpose: "analytics_unlock",
+      challengeIdHash: challengeHash as any,
+    },
+    orderBy: { createdAt: "desc" as any },
+  });
+
+  if (!session) throw new Error("Step-up challenge not found.");
+  if (session.lockedUntil && new Date(session.lockedUntil) > now) {
+    throw new Error(
+      `Step-up authentication is locked. Try again after ${new Date(
+        session.lockedUntil
+      ).toISOString()}`
+    );
+  }
+  if (session.expiresAt && new Date(session.expiresAt) < now) {
+    throw new Error("Step-up challenge expired. Please start again.");
   }
 
-  // Extract labels and data based on chart type
-  const labels: string[] = [];
-  const datasets: Array<{ label: string; data: number[]; backgroundColor?: string }> = [];
+  const failedAttempts = Number(session.failedAttempts ?? 0);
 
-  // Group data for chart
-  if (config.groupBy && config.groupBy.length > 0) {
-    const grouped = groupData(data, config.groupBy[0]);
-    labels.push(...Object.keys(grouped));
-    
-    const metricField = config.fields.find((f) => f.type === 'metric');
-    if (metricField) {
-      datasets.push({
-        label: metricField.name,
-        data: Object.values(grouped).map((group: any) => {
-          return group.reduce((sum: number, item: any) => {
-            return sum + (item[metricField.id] || 0);
-          }, 0);
-        }) as number[],
-      });
+  if (!verificationPassed) {
+    const nextFailed = failedAttempts + 1;
+    const shouldLock = nextFailed >= MAX_FAILED_ATTEMPTS;
+    const lockedUntil = shouldLock ? addMinutes(now, LOCKOUT_DURATION_MINUTES) : null;
+
+    await prisma.stepUpSession.update({
+      where: { id: session.id } as any,
+      data: {
+        failedAttempts: nextFailed as any,
+        lockedUntil: lockedUntil as any,
+        lastAttemptAt: now as any,
+      } as any,
+    });
+
+    if (shouldLock) {
+      throw new Error(
+        `Too many failed attempts. Locked until ${lockedUntil!.toISOString()}`
+      );
     }
+    throw new Error("Verification failed.");
   }
 
-  return {
-    labels,
-    datasets,
-  };
+  const unlockedUntil = addSeconds(now, ANALYTICS_UNLOCK_DURATION_SECONDS);
+
+  await prisma.stepUpSession.update({
+    where: { id: session.id } as any,
+    data: {
+      verifiedAt: now as any,
+      unlockedUntil: unlockedUntil as any,
+      failedAttempts: 0 as any,
+      lockedUntil: null as any,
+    } as any,
+  });
+
+  const token = generateAccessToken({
+    tenantId,
+    userId,
+    purpose: "analytics_unlock",
+    exp: Math.floor(unlockedUntil.getTime() / 1000),
+  } as any);
+
+  return { unlockedUntil, token };
 }
 
 /**
- * Group data by field
+ * Convenience check: is analytics currently unlocked?
  */
-function groupData(data: any[], field: string): Record<string, any[]> {
-  return data.reduce((acc, item) => {
-    const key = item[field] || 'Unknown';
-    if (!acc[key]) {
-      acc[key] = [];
-    }
-    acc[key].push(item);
-    return acc;
-  }, {} as Record<string, any[]>);
+export async function isAnalyticsUnlocked(
+  tenantId: string,
+  userId: string
+): Promise<boolean> {
+  const now = new Date();
+  const latest = await prisma.stepUpSession.findFirst({
+    where: {
+      tenantId,
+      userId,
+      purpose: "analytics_unlock",
+      unlockedUntil: { gt: now } as any,
+    },
+    orderBy: { unlockedUntil: "desc" as any },
+  });
+
+  return Boolean(latest);
+}
+
+/* ----------------------------------------------------------------------------
+ * ✅ Compatibility exports (so your existing API routes compile)
+ * ----------------------------------------------------------------------------
+ * Your routes currently import:
+ *   - verifyAnalyticsStepUp
+ *   - verifyAnalyticsUnlockToken
+ *
+ * We implement them as thin wrappers around the newer functions.
+ */
+
+/**
+ * verifyAnalyticsStepUp
+ * - Wrapper around completeAnalyticsStepUp
+ * - Accepts flexible params so existing route code doesn't need changes
+ */
+export async function verifyAnalyticsStepUp(args: {
+  tenantId: string;
+  userId: string;
+  challengeId: string;
+  verificationPassed: boolean;
+}): Promise<{ ok: boolean; token?: string; unlockedUntil?: Date; error?: string }> {
+  try {
+    const { tenantId, userId, challengeId, verificationPassed } = args;
+    const res = await completeAnalyticsStepUp(
+      tenantId,
+      userId,
+      challengeId,
+      verificationPassed
+    );
+    return { ok: true, token: res.token, unlockedUntil: res.unlockedUntil };
+  } catch (e: any) {
+    return { ok: false, error: e?.message ?? "Verification failed" };
+  }
 }
 
 /**
- * Get available report fields
+ * verifyAnalyticsUnlockToken
+ * - Minimal validator used by analytics routes to gate access.
+ * - If you later add JWT verification (recommended), wire it in here.
+ *
+ * For now this checks server-side unlock state to avoid relying solely on token parsing.
  */
-export function getAvailableFields(): ReportField[] {
-  return [
-    // Metrics
-    { id: 'revenue', name: 'Revenue', type: 'metric', dataType: 'number', aggregation: 'sum', format: 'currency' },
-    { id: 'sales_count', name: 'Sales Count', type: 'metric', dataType: 'number', aggregation: 'count' },
-    { id: 'avg_order_value', name: 'Average Order Value', type: 'metric', dataType: 'number', aggregation: 'avg', format: 'currency' },
-    { id: 'profit', name: 'Profit', type: 'metric', dataType: 'number', aggregation: 'sum', format: 'currency' },
-    { id: 'quantity_sold', name: 'Quantity Sold', type: 'metric', dataType: 'number', aggregation: 'sum' },
-    
-    // Dimensions
-    { id: 'product_name', name: 'Product Name', type: 'dimension', dataType: 'string' },
-    { id: 'category', name: 'Category', type: 'dimension', dataType: 'string' },
-    { id: 'customer_name', name: 'Customer Name', type: 'dimension', dataType: 'string' },
-    { id: 'payment_method', name: 'Payment Method', type: 'dimension', dataType: 'string' },
-    { id: 'branch', name: 'Branch', type: 'dimension', dataType: 'string' },
-    
-    // Date
-    { id: 'date', name: 'Date', type: 'date', dataType: 'date' },
-    { id: 'month', name: 'Month', type: 'date', dataType: 'date' },
-    { id: 'year', name: 'Year', type: 'date', dataType: 'date' },
-  ];
-}
+export async function verifyAnalyticsUnlockToken(args: {
+  tenantId: string;
+  userId: string;
+  token?: string | null;
+}): Promise<VerifyAnalyticsUnlockResult> {
+  try {
+    const { tenantId, userId, token } = args;
 
-/**
- * Get predefined report templates
- */
-export function getReportTemplates(): ReportConfig[] {
-  return [
-    {
-      name: 'Sales by Product',
-      description: 'Revenue and quantity sold by product',
-      fields: [
-        { id: 'product_name', name: 'Product', type: 'dimension', dataType: 'string' },
-        { id: 'revenue', name: 'Revenue', type: 'metric', dataType: 'number', aggregation: 'sum', format: 'currency' },
-        { id: 'quantity_sold', name: 'Quantity', type: 'metric', dataType: 'number', aggregation: 'sum' },
-      ],
-      filters: [],
-      groupBy: ['product_name'],
-      format: 'both',
-      chartType: 'bar',
-    },
-    {
-      name: 'Sales Trend',
-      description: 'Revenue trend over time',
-      fields: [
-        { id: 'date', name: 'Date', type: 'date', dataType: 'date' },
-        { id: 'revenue', name: 'Revenue', type: 'metric', dataType: 'number', aggregation: 'sum', format: 'currency' },
-      ],
-      filters: [],
-      groupBy: ['date'],
-      orderBy: [{ field: 'date', direction: 'asc' }],
-      format: 'both',
-      chartType: 'line',
-    },
-    {
-      name: 'Customer Analytics',
-      description: 'Customer purchase behavior',
-      fields: [
-        { id: 'customer_name', name: 'Customer', type: 'dimension', dataType: 'string' },
-        { id: 'sales_count', name: 'Orders', type: 'metric', dataType: 'number', aggregation: 'count' },
-        { id: 'revenue', name: 'Total Revenue', type: 'metric', dataType: 'number', aggregation: 'sum', format: 'currency' },
-        { id: 'avg_order_value', name: 'Avg Order Value', type: 'metric', dataType: 'number', aggregation: 'avg', format: 'currency' },
-      ],
-      filters: [],
-      groupBy: ['customer_name'],
-      orderBy: [{ field: 'revenue', direction: 'desc' }],
-      format: 'table',
-    },
-  ];
+    if (!token) return { ok: false, reason: "missing_token" };
+
+    // Strong check: server-side unlocked window
+    const unlocked = await isAnalyticsUnlocked(tenantId, userId);
+    if (!unlocked) return { ok: false, reason: "not_unlocked" };
+
+    // Optional lightweight payload (don’t parse/verify JWT here unless you have a verifier)
+    return { ok: true, payload: { tenantId, userId } };
+  } catch {
+    return { ok: false, reason: "unknown" };
+  }
 }

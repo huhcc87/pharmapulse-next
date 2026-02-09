@@ -1,9 +1,8 @@
+// src/lib/billing/multi-currency.ts
 // Multi-Currency Support
 // Currency selection, exchange rate management, multi-currency invoices
 
-import { PrismaClient } from "@prisma/client";
-
-const prisma = new PrismaClient();
+import { prisma } from "@/lib/prisma";
 
 export interface CurrencyData {
   code: string;
@@ -25,12 +24,8 @@ export interface ExchangeRateData {
  */
 export async function getCurrencies(): Promise<CurrencyData[]> {
   const currencies = await prisma.currency.findMany({
-    where: {
-      isActive: true,
-    },
-    orderBy: {
-      code: "asc",
-    },
+    where: { isActive: true },
+    orderBy: { code: "asc" },
   });
 
   return currencies.map((c) => ({
@@ -50,29 +45,18 @@ export async function setTenantCurrency(
   isDefault: boolean = true
 ): Promise<void> {
   try {
-    // Verify currency exists
     const currency = await prisma.currency.findUnique({
       where: { code: currencyCode },
     });
+    if (!currency) throw new Error("Currency not found");
 
-    if (!currency) {
-      throw new Error("Currency not found");
-    }
-
-    // If setting as default, unset other defaults
     if (isDefault) {
       await prisma.tenantCurrency.updateMany({
-        where: {
-          tenantId,
-          isDefault: true,
-        },
-        data: {
-          isDefault: false,
-        },
+        where: { tenantId, isDefault: true },
+        data: { isDefault: false },
       });
     }
 
-    // Upsert tenant currency
     await prisma.tenantCurrency.upsert({
       where: {
         tenantId_currencyCode: {
@@ -97,20 +81,25 @@ export async function setTenantCurrency(
 
 /**
  * Get tenant currencies
+ *
+ * NOTE:
+ * Your Prisma schema does not define a relation between TenantCurrency and Currency,
+ * so we do NOT use `include`. We join manually using a currencyMap.
  */
-export async function getTenantCurrencies(tenantId: string): Promise<Array<{
-  currencyCode: string;
-  isDefault: boolean;
-  currency?: CurrencyData;
-}>> {
+export async function getTenantCurrencies(
+  tenantId: string
+): Promise<
+  Array<{
+    currencyCode: string;
+    isDefault: boolean;
+    currency?: CurrencyData;
+  }>
+> {
   const tenantCurrencies = await prisma.tenantCurrency.findMany({
     where: { tenantId },
-    include: {
-      // Note: This would require a relation in schema
-    },
+    orderBy: [{ isDefault: "desc" }, { currencyCode: "asc" }],
   });
 
-  // Get currency details
   const currencies = await getCurrencies();
   const currencyMap = new Map(currencies.map((c) => [c.code, c]));
 
@@ -130,9 +119,7 @@ export async function getExchangeRate(
   date?: Date
 ): Promise<number> {
   try {
-    if (fromCurrency === toCurrency) {
-      return 1;
-    }
+    if (fromCurrency === toCurrency) return 1;
 
     const effectiveDate = date || new Date();
 
@@ -140,19 +127,12 @@ export async function getExchangeRate(
       where: {
         fromCurrency,
         toCurrency,
-        effectiveDate: {
-          lte: effectiveDate,
-        },
+        effectiveDate: { lte: effectiveDate },
       },
-      orderBy: {
-        effectiveDate: "desc",
-      },
+      orderBy: { effectiveDate: "desc" },
     });
 
-    if (!exchangeRate) {
-      // Default to 1 if no rate found (would fetch from API in production)
-      return 1;
-    }
+    if (!exchangeRate) return 1;
 
     return Number(exchangeRate.rate);
   } catch (error: any) {
@@ -164,9 +144,7 @@ export async function getExchangeRate(
 /**
  * Set exchange rate
  */
-export async function setExchangeRate(
-  data: ExchangeRateData
-): Promise<void> {
+export async function setExchangeRate(data: ExchangeRateData): Promise<void> {
   try {
     await prisma.exchangeRate.create({
       data: {

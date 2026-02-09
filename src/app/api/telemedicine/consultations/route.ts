@@ -1,3 +1,4 @@
+// src/app/api/telemedicine/consultations/route.ts
 // Telemedicine Consultations API
 // GET /api/telemedicine/consultations - List consultations
 // POST /api/telemedicine/consultations - Book consultation
@@ -5,24 +6,46 @@
 import { NextRequest, NextResponse } from "next/server";
 import { getSessionUser, requireAuth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
-import { bookConsultation, getConsultationHistory } from "@/lib/telemedicine/consultation-manager";
+import {
+  bookConsultation,
+  getConsultationHistory,
+} from "@/lib/telemedicine/consultation-manager";
+
+const DEMO_TENANT_ID = 1;
+
+function toInt(value: unknown): number | undefined {
+  if (value === null || value === undefined) return undefined;
+  const n =
+    typeof value === "string" && value.trim() !== ""
+      ? Number(value)
+      : Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function resolveTenantId(user: any): number {
+  return toInt(user?.tenantId) ?? DEMO_TENANT_ID;
+}
 
 export async function GET(req: NextRequest) {
   try {
     const user = await getSessionUser();
     requireAuth(user);
 
-    const searchParams = req.nextUrl.searchParams;
-    const customerId = searchParams.get("customerId");
-    const doctorId = searchParams.get("doctorId");
-    const status = searchParams.get("status");
+    const tenantId = resolveTenantId(user);
 
-    if (customerId) {
+    const searchParams = req.nextUrl.searchParams;
+    const customerIdRaw = searchParams.get("customerId");
+    const doctorIdRaw = searchParams.get("doctorId");
+    const statusRaw = searchParams.get("status");
+
+    const customerId = toInt(customerIdRaw);
+    const doctorId = toInt(doctorIdRaw);
+    const status = statusRaw ?? undefined;
+
+    if (customerId !== undefined) {
       // Get consultation history for customer
-      const history = await getConsultationHistory(
-        parseInt(customerId),
-        user.tenantId || 1
-      );
+      const history = await getConsultationHistory(customerId, tenantId);
+
       return NextResponse.json({
         success: true,
         consultations: history,
@@ -32,9 +55,9 @@ export async function GET(req: NextRequest) {
     // List all consultations
     const consultations = await prisma.consultation.findMany({
       where: {
-        tenantId: user.tenantId || 1,
-        ...(doctorId && { doctorId: parseInt(doctorId) }),
-        ...(status && { status }),
+        tenantId,
+        ...(doctorId !== undefined ? { doctorId } : {}),
+        ...(status ? ({ status } as any) : {}),
       },
       include: {
         customer: {
@@ -64,7 +87,7 @@ export async function GET(req: NextRequest) {
   } catch (error: any) {
     console.error("List consultations API error:", error);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { error: error?.message || "Internal server error" },
       { status: 500 }
     );
   }
@@ -75,17 +98,22 @@ export async function POST(req: NextRequest) {
     const user = await getSessionUser();
     requireAuth(user);
 
-    const body = await req.json();
-    const { customerId, doctorId, appointmentDate, symptoms } = body;
+    const tenantId = resolveTenantId(user);
 
-    if (!customerId) {
+    const body = await req.json();
+    const { customerId, doctorId, appointmentDate, symptoms } = body ?? {};
+
+    const customerIdNum = toInt(customerId);
+    const doctorIdNum = toInt(doctorId);
+
+    if (customerIdNum === undefined) {
       return NextResponse.json(
         { error: "customerId is required" },
         { status: 400 }
       );
     }
 
-    if (!doctorId) {
+    if (doctorIdNum === undefined) {
       return NextResponse.json(
         { error: "doctorId is required" },
         { status: 400 }
@@ -99,12 +127,20 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const apptDate = new Date(appointmentDate);
+    if (Number.isNaN(apptDate.getTime())) {
+      return NextResponse.json(
+        { error: "appointmentDate must be a valid date" },
+        { status: 400 }
+      );
+    }
+
     const result = await bookConsultation({
-      customerId: parseInt(customerId),
-      doctorId: parseInt(doctorId),
-      appointmentDate: new Date(appointmentDate),
+      customerId: customerIdNum,
+      doctorId: doctorIdNum,
+      appointmentDate: apptDate,
       symptoms,
-      tenantId: user.tenantId || 1,
+      tenantId, // ✅ always number
     });
 
     if (!result.success) {
@@ -124,7 +160,7 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error("Book consultation API error:", error);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { error: error?.message || "Internal server error" },
       { status: 500 }
     );
   }

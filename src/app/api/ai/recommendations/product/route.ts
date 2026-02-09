@@ -1,36 +1,61 @@
 // GET/POST /api/ai/recommendations/product
 // Get AI-powered product recommendations
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { getSessionUser, requireAuth } from "@/lib/auth";
 import { getProductRecommendations } from "@/lib/ai/product-recommendations";
 import { prisma } from "@/lib/prisma";
 
 const DEMO_TENANT_ID = 1;
 
-export async function GET(req: NextRequest) {
+function resolveTenantId(user: any): number {
+  const raw = user?.tenantId;
+
+  // If already a number (or 1), use it
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+
+  // If it's a string, coerce to number
+  if (typeof raw === "string") {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+  }
+
+  return DEMO_TENANT_ID;
+}
+
+function parseCustomerId(value: string | null): number | undefined {
+  if (!value) return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+type CartItem = { productId?: number; productName: string; category?: string };
+
+function parseCartItemsFromQuery(value: string | null): CartItem[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? (parsed as CartItem[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function GET(req: Request) {
   try {
     const user = await getSessionUser();
     requireAuth(user);
 
+    const tenantId = resolveTenantId(user);
+
     const { searchParams } = new URL(req.url);
-    const customerId = searchParams.get("customerId") ? parseInt(searchParams.get("customerId")!) : null;
-    const cartItemsJson = searchParams.get("cartItems");
-
-    let cartItems: Array<{ productId?: number; productName: string; category?: string }> = [];
-
-    if (cartItemsJson) {
-      try {
-        cartItems = JSON.parse(cartItemsJson);
-      } catch (e) {
-        // Invalid JSON, ignore
-      }
-    }
+    const customerId = parseCustomerId(searchParams.get("customerId"));
+    const cartItems = parseCartItemsFromQuery(searchParams.get("cartItems"));
 
     const recommendations = await getProductRecommendations(
       cartItems,
-      customerId || undefined,
-      user.tenantId || DEMO_TENANT_ID
+      customerId,
+      tenantId
     );
 
     return NextResponse.json({
@@ -41,50 +66,52 @@ export async function GET(req: NextRequest) {
   } catch (error: any) {
     console.error("Product recommendations error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to get recommendations" },
+      { error: error?.message || "Failed to get recommendations" },
       { status: 500 }
     );
   }
 }
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const user = await getSessionUser();
     requireAuth(user);
 
+    const tenantId = resolveTenantId(user);
+
     const body = await req.json();
-    const { cartItems, customerId } = body;
+    const cartItems: CartItem[] = Array.isArray(body?.cartItems) ? body.cartItems : [];
+    const customerId: number | undefined =
+      body?.customerId == null ? undefined : Number(body.customerId);
+
+    const safeCustomerId = Number.isFinite(customerId as number)
+      ? (customerId as number)
+      : undefined;
 
     const recommendations = await getProductRecommendations(
-      cartItems || [],
-      customerId || undefined,
-      user.tenantId || DEMO_TENANT_ID
+      cartItems,
+      safeCustomerId,
+      tenantId
     );
 
-    // Optionally save recommendation tracking
-    if (cartItems && cartItems.length > 0) {
-      // Track recommendations shown (for ML model improvement)
-      // This can be async and non-blocking
-      Promise.all(
-        recommendations.map((rec) =>
+    // Optionally save recommendation tracking (non-blocking)
+    if (cartItems.length > 0) {
+      void Promise.allSettled(
+        recommendations.map((rec: any) =>
           prisma.aIProductRecommendation.create({
             data: {
-              tenantId: user.tenantId || DEMO_TENANT_ID,
-              sourceProductId: cartItems[0]?.productId || null,
+              tenantId,
+              sourceProductId: cartItems[0]?.productId ?? null,
               recommendedProductId: rec.productId,
-              customerId: customerId || null,
+              customerId: safeCustomerId ?? null,
               recommendationType: rec.recommendationType,
               score: rec.score,
-              reason: rec.reason || null,
-              season: rec.season || null,
+              reason: rec.reason ?? null,
+              season: rec.season ?? null,
             },
-          }).catch(() => {
-            // Ignore errors - tracking is optional
           })
         )
-      ).catch(() => {
-        // Ignore errors
-      });
+      );
     }
 
     return NextResponse.json({
@@ -95,7 +122,7 @@ export async function POST(req: NextRequest) {
   } catch (error: any) {
     console.error("Product recommendations error:", error);
     return NextResponse.json(
-      { error: error.message || "Failed to get recommendations" },
+      { error: error?.message || "Failed to get recommendations" },
       { status: 500 }
     );
   }

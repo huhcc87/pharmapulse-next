@@ -63,7 +63,9 @@ export async function detectFraud(
     result.amountAnomaly = amountAnalysis.isAnomaly;
     if (amountAnalysis.isAnomaly) {
       result.fraudRiskScore += 30;
-      result.fraudIndicators?.push(`Unusual transaction amount: ₹${(invoice.totalInvoicePaise / 100).toFixed(2)}`);
+      result.fraudIndicators?.push(
+        `Unusual transaction amount: ₹${(invoice.totalInvoicePaise / 100).toFixed(2)}`
+      );
       result.isInflated = amountAnalysis.isInflated || false;
     }
 
@@ -116,7 +118,7 @@ export async function detectFraud(
       const customerRisk = await calculateCustomerRiskScore(invoice.customerId, tenantId);
       result.customerRiskScore = customerRisk.score;
       result.customerRiskLevel = customerRisk.level;
-      
+
       if (customerRisk.score >= 70) {
         result.fraudRiskScore += 15;
       }
@@ -133,7 +135,9 @@ export async function detectFraud(
 
     // Generate fraud reason
     if (result.fraudRiskScore > 0) {
-      result.fraudReason = `Fraud risk score: ${result.fraudRiskScore}/100. Indicators: ${result.fraudIndicators?.join(", ")}`;
+      result.fraudReason = `Fraud risk score: ${result.fraudRiskScore}/100. Indicators: ${result.fraudIndicators?.join(
+        ", "
+      )}`;
     }
 
     return result;
@@ -145,57 +149,49 @@ export async function detectFraud(
 
 // Helper functions
 
-function analyzeAmountAnomaly(invoice: any, tenantId: number): {
+function analyzeAmountAnomaly(
+  invoice: any,
+  _tenantId: number
+): {
   isAnomaly: boolean;
   isInflated?: boolean;
 } {
-  const amount = invoice.totalInvoicePaise / 100; // Convert to rupees
+  const amount = invoice.totalInvoicePaise / 100; // rupees
 
-  // Get average transaction amount for this customer
-  // For now, use thresholds based on Indian pharmacy typical values
-  
-  // Typical pharmacy transaction: ₹200-2000
-  // Large transaction: >₹5000 (unusual for single visit)
-  // Very large: >₹10000 (high risk)
-  
   const isLarge = amount > 5000;
   const isVeryLarge = amount > 10000;
-  
+
   return {
     isAnomaly: isLarge,
     isInflated: isVeryLarge,
   };
 }
 
-function analyzeTimeAnomaly(invoice: any, tenantId: number): {
+function analyzeTimeAnomaly(
+  invoice: any,
+  _tenantId: number
+): {
   isAnomaly: boolean;
 } {
   const invoiceDate = new Date(invoice.invoiceDate);
   const hour = invoiceDate.getHours();
-  
-  // Indian pharmacy typical hours: 8 AM - 10 PM
-  // Anomalous: Before 8 AM or after 10 PM
+
   const isAnomalous = hour < 8 || hour > 22;
-  
-  return {
-    isAnomaly: isAnomalous,
-  };
+
+  return { isAnomaly: isAnomalous };
 }
 
-async function analyzePatternAnomaly(invoice: any, tenantId: number): Promise<{
+async function analyzePatternAnomaly(
+  invoice: any,
+  tenantId: number
+): Promise<{
   isAnomaly: boolean;
   reason?: string;
 }> {
-  // Check for unusual product combinations
-  // Check for rapid successive transactions
-  // Check for unusual quantities
-  
-  if (!invoice.customerId) {
-    return { isAnomaly: false };
-  }
+  if (!invoice.customerId) return { isAnomaly: false };
 
-  // Check for rapid successive transactions (same customer, within 1 hour)
-  const oneHourAgo = new Date(invoice.invoiceDate.getTime() - 60 * 60 * 1000);
+  const oneHourAgo = new Date(new Date(invoice.invoiceDate).getTime() - 60 * 60 * 1000);
+
   const recentInvoices = await prisma.invoice.findMany({
     where: {
       tenantId,
@@ -214,31 +210,27 @@ async function analyzePatternAnomaly(invoice: any, tenantId: number): Promise<{
     };
   }
 
-  // Check for unusual quantities (single product > 100 units)
   if (invoice.lineItems && invoice.lineItems.length > 0) {
     const highQuantity = invoice.lineItems.some((item: any) => item.quantity > 100);
     if (highQuantity) {
-      return {
-        isAnomaly: true,
-        reason: "Unusual quantity purchased (>100 units)",
-      };
+      return { isAnomaly: true, reason: "Unusual quantity purchased (>100 units)" };
     }
   }
 
   return { isAnomaly: false };
 }
 
-async function checkDuplicateInvoice(invoice: any, tenantId: number): Promise<{
+async function checkDuplicateInvoice(
+  invoice: any,
+  tenantId: number
+): Promise<{
   isDuplicate: boolean;
   duplicateInvoiceId?: number;
 }> {
-  if (!invoice.customerId || !invoice.lineItems) {
-    return { isDuplicate: false };
-  }
+  if (!invoice.customerId) return { isDuplicate: false };
 
-  // Check for invoices with same total amount and same customer (within 24 hours)
-  const oneDayAgo = new Date(invoice.invoiceDate.getTime() - 24 * 60 * 60 * 1000);
-  
+  const oneDayAgo = new Date(new Date(invoice.invoiceDate).getTime() - 24 * 60 * 60 * 1000);
+
   const similarInvoices = await prisma.invoice.findMany({
     where: {
       tenantId,
@@ -249,7 +241,6 @@ async function checkDuplicateInvoice(invoice: any, tenantId: number): Promise<{
         lte: invoice.invoiceDate,
       },
       totalInvoicePaise: {
-        // Within 5% of this invoice amount
         gte: Math.round(invoice.totalInvoicePaise * 0.95),
         lte: Math.round(invoice.totalInvoicePaise * 1.05),
       },
@@ -257,42 +248,30 @@ async function checkDuplicateInvoice(invoice: any, tenantId: number): Promise<{
   });
 
   if (similarInvoices.length > 0) {
-    return {
-      isDuplicate: true,
-      duplicateInvoiceId: similarInvoices[0].id,
-    };
+    return { isDuplicate: true, duplicateInvoiceId: similarInvoices[0].id };
   }
 
   return { isDuplicate: false };
 }
 
-async function checkInsuranceFraud(invoice: any, tenantId: number): Promise<{
+async function checkInsuranceFraud(
+  invoice: any,
+  tenantId: number
+): Promise<{
   isFraud: boolean;
   reason?: string;
 }> {
-  // Check for patterns typical of insurance fraud:
-  // - Multiple high-value claims from same customer
-  // - Claim amount exceeds typical limits
-  // - Unusual product combinations
-  
-  if (!invoice.customerId) {
-    return { isFraud: false };
-  }
+  if (!invoice.customerId) return { isFraud: false };
 
-  // Check for multiple insurance claims from same customer (last 30 days)
-  const thirtyDaysAgo = new Date(invoice.invoiceDate.getTime() - 30 * 24 * 60 * 60 * 1000);
-  
+  const thirtyDaysAgo = new Date(new Date(invoice.invoiceDate).getTime() - 30 * 24 * 60 * 60 * 1000);
+
   const insuranceClaims = await prisma.invoice.findMany({
     where: {
       tenantId,
       customerId: invoice.customerId,
       paymentMethod: "INSURANCE",
-      invoiceDate: {
-        gte: thirtyDaysAgo,
-      },
-      totalInvoicePaise: {
-        gt: 500000, // >₹5000
-      },
+      invoiceDate: { gte: thirtyDaysAgo },
+      totalInvoicePaise: { gt: 500000 }, // >₹5000
     },
   });
 
@@ -306,14 +285,7 @@ async function checkInsuranceFraud(invoice: any, tenantId: number): Promise<{
   return { isFraud: false };
 }
 
-function checkPaymentFraud(payments: any[]): {
-  isFraud: boolean;
-  reason?: string;
-} {
-  // Check for suspicious payment patterns:
-  // - Multiple payment methods for same invoice (split payment fraud)
-  // - UPI transaction failures followed by cash
-  
+function checkPaymentFraud(payments: any[]): { isFraud: boolean; reason?: string } {
   if (payments.length > 3) {
     return {
       isFraud: true,
@@ -321,11 +293,14 @@ function checkPaymentFraud(payments: any[]): {
     };
   }
 
-  // Check for failed UPI followed by cash (possible chargeback fraud)
   const hasFailedUPI = payments.some((p) => p.method === "UPI" && p.status === "FAILED");
-  const hasCashAfterFailure = payments.some(
-    (p) => p.method === "CASH" && new Date(p.createdAt) > new Date(payments[0].createdAt)
-  );
+  const firstCreatedAt = payments[0]?.createdAt ? new Date(payments[0].createdAt) : null;
+
+  const hasCashAfterFailure = payments.some((p) => {
+    if (p.method !== "CASH") return false;
+    if (!firstCreatedAt) return false;
+    return new Date(p.createdAt) > firstCreatedAt;
+  });
 
   if (hasFailedUPI && hasCashAfterFailure) {
     return {
@@ -337,62 +312,57 @@ function checkPaymentFraud(payments: any[]): {
   return { isFraud: false };
 }
 
-async function calculateCustomerRiskScore(customerId: number, tenantId: number): Promise<{
-  score: number;
-  level: string;
-}> {
-  // Calculate risk based on:
-  // - Number of returns/credit notes
-  // - Number of flagged invoices
-  // - Payment history
-  // - Purchase frequency anomalies
-  
+async function calculateCustomerRiskScore(
+  customerId: number,
+  tenantId: number
+): Promise<{ score: number; level: string }> {
   const customer = await prisma.customer.findUnique({
     where: { id: customerId },
     include: {
       creditNotes: {
         where: {
-          reason: {
-            in: ["DAMAGED", "WRONG_ITEM", "QUALITY_ISSUE"],
-          },
+          reason: { in: ["DAMAGED", "WRONG_ITEM", "QUALITY_ISSUE"] },
         },
       },
       invoices: {
         take: 50,
+        orderBy: { invoiceDate: "desc" },
       },
     },
   });
 
+  // ✅ Guard: avoids "customer is possibly null"
+  if (!customer) {
+    return { score: 0, level: "LOW" };
+  }
+
   let riskScore = 0;
 
   // High number of returns = risky
-  if (customer?.creditNotes && customer.creditNotes.length > 5) {
+  if (customer.creditNotes && customer.creditNotes.length > 5) {
     riskScore += 30;
   }
 
   // Frequent small transactions (possible fraud)
-  const invoiceCount = customer?.invoices?.length || 0;
+  const invoiceCount = customer.invoices ? customer.invoices.length : 0;
+
   if (invoiceCount > 20) {
-    const avgAmount = customer.invoices.reduce(
-      (sum, inv) => sum + inv.totalInvoicePaise,
+    const totalPaise = (customer.invoices || []).reduce(
+      (sum: number, inv: any) => sum + (inv.totalInvoicePaise || 0),
       0
-    ) / invoiceCount;
-    
-    if (avgAmount < 20000) { // <₹200 average
+    );
+
+    const avgAmountPaise = invoiceCount > 0 ? totalPaise / invoiceCount : 0;
+
+    if (avgAmountPaise < 20000) {
+      // <₹200 average
       riskScore += 20;
     }
   }
 
-  // Determine level
   let level = "LOW";
-  if (riskScore >= 70) {
-    level = "HIGH";
-  } else if (riskScore >= 40) {
-    level = "MEDIUM";
-  }
+  if (riskScore >= 70) level = "HIGH";
+  else if (riskScore >= 40) level = "MEDIUM";
 
-  return {
-    score: Math.min(100, riskScore),
-    level,
-  };
+  return { score: Math.min(100, riskScore), level };
 }

@@ -2,7 +2,7 @@
 // GET /api/health/reminders - Get reminders
 // POST /api/health/reminders - Create reminder
 
-import { NextRequest, NextResponse } from "next/server";
+import { NextResponse } from "next/server";
 import { getSessionUser, requireAuth } from "@/lib/auth";
 import {
   createHealthReminder,
@@ -11,14 +11,40 @@ import {
   getUpcomingReminders,
 } from "@/lib/health/health-reminders";
 
-export async function GET(req: NextRequest) {
+const DEMO_TENANT_ID = 1;
+
+function resolveTenantId(user: any): number {
+  const raw = user?.tenantId;
+
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+
+  if (typeof raw === "string") {
+    const n = Number(raw);
+    if (Number.isFinite(n)) return n;
+  }
+
+  return DEMO_TENANT_ID;
+}
+
+function toInt(value: unknown, fallback?: number): number | undefined {
+  if (value === null || value === undefined) return fallback;
+  const n = typeof value === "number" ? value : Number(String(value));
+  return Number.isFinite(n) ? n : fallback;
+}
+
+export async function GET(req: Request) {
   try {
     const user = await getSessionUser();
     requireAuth(user);
 
-    const searchParams = req.nextUrl.searchParams;
-    const customerId = searchParams.get("customerId");
-    const days = searchParams.get("days") || "7";
+    const tenantId = resolveTenantId(user);
+
+    const { searchParams } = new URL(req.url);
+    const customerIdRaw = searchParams.get("customerId");
+    const daysRaw = searchParams.get("days") ?? "7";
+
+    const customerId = toInt(customerIdRaw);
+    const days = toInt(daysRaw, 7) ?? 7;
 
     if (!customerId) {
       return NextResponse.json(
@@ -27,11 +53,7 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const reminders = await getUpcomingReminders(
-      parseInt(customerId),
-      parseInt(days),
-      user.tenantId || 1
-    );
+    const reminders = await getUpcomingReminders(customerId, days, tenantId);
 
     return NextResponse.json({
       success: true,
@@ -40,19 +62,21 @@ export async function GET(req: NextRequest) {
   } catch (error: any) {
     console.error("Get health reminders API error:", error);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { error: error?.message || "Internal server error" },
       { status: 500 }
     );
   }
 }
 
-export async function POST(req: NextRequest) {
+export async function POST(req: Request) {
   try {
     const user = await getSessionUser();
     requireAuth(user);
 
+    const tenantId = resolveTenantId(user);
+
     const body = await req.json();
-    const { type, ...data } = body;
+    const { type, ...data } = body ?? {};
 
     if (!type) {
       return NextResponse.json(
@@ -61,37 +85,69 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let result;
+    let result: any;
 
     switch (type) {
-      case "medicine_intake":
+      case "medicine_intake": {
+        const customerId = toInt(data.customerId);
+        const prescriptionId = toInt(data.prescriptionId);
+        const durationDays = toInt(data.durationDays);
+
+        if (!customerId || !prescriptionId || !data.medicineName || !data.startDate || !durationDays) {
+          return NextResponse.json(
+            { error: "Missing required fields for medicine_intake" },
+            { status: 400 }
+          );
+        }
+
         result = await scheduleMedicineIntakeReminders(
-          data.customerId,
-          data.prescriptionId,
+          customerId,
+          prescriptionId,
           data.medicineName,
           data.dosage,
           new Date(data.startDate),
-          data.durationDays,
-          user.tenantId || 1
+          durationDays,
+          tenantId
         );
         break;
+      }
 
-      case "prescription_refill":
+      case "prescription_refill": {
+        const customerId = toInt(data.customerId);
+        const prescriptionId = toInt(data.prescriptionId);
+        const daysBeforeRefill = toInt(data.daysBeforeRefill, 7) ?? 7;
+
+        if (!customerId || !prescriptionId) {
+          return NextResponse.json(
+            { error: "Missing required fields for prescription_refill" },
+            { status: 400 }
+          );
+        }
+
         result = await schedulePrescriptionRefillReminder(
-          data.customerId,
-          data.prescriptionId,
-          data.daysBeforeRefill || 7,
-          user.tenantId || 1
+          customerId,
+          prescriptionId,
+          daysBeforeRefill,
+          tenantId
         );
         break;
+      }
 
-      case "custom":
+      case "custom": {
+        if (!data.scheduledDate) {
+          return NextResponse.json(
+            { error: "scheduledDate is required for custom reminders" },
+            { status: 400 }
+          );
+        }
+
         result = await createHealthReminder({
           ...data,
           scheduledDate: new Date(data.scheduledDate),
-          tenantId: user.tenantId || 1,
+          tenantId,
         });
         break;
+      }
 
       default:
         return NextResponse.json(
@@ -100,9 +156,9 @@ export async function POST(req: NextRequest) {
         );
     }
 
-    if (!result.success) {
+    if (!result?.success) {
       return NextResponse.json(
-        { error: result.error || "Reminder creation failed" },
+        { error: result?.error || "Reminder creation failed" },
         { status: 500 }
       );
     }
@@ -110,12 +166,12 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       reminderId: result.reminderId,
-      ...(result as any).remindersCreated && { remindersCreated: (result as any).remindersCreated },
+      ...(result?.remindersCreated != null && { remindersCreated: result.remindersCreated }),
     });
   } catch (error: any) {
     console.error("Create health reminder API error:", error);
     return NextResponse.json(
-      { error: error.message || "Internal server error" },
+      { error: error?.message || "Internal server error" },
       { status: 500 }
     );
   }

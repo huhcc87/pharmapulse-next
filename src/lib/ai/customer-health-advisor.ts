@@ -33,6 +33,29 @@ export interface SymptomAnalysisResult {
 }
 
 /**
+ * Extract a usable medication/product name from a prescription line.
+ * This is defensive because different schemas name this field differently
+ * (e.g., medicationName, productName, name) and sometimes it's only available
+ * via relations.
+ */
+function getLineDrugName(line: any): string {
+  const candidate =
+    line?.drugName ??
+    line?.medicationName ??
+    line?.medicineName ??
+    line?.productName ??
+    line?.name ??
+    line?.title ??
+    line?.drugLibrary?.name ??
+    line?.drugLibraryItem?.name ??
+    line?.product?.name ??
+    line?.product?.title ??
+    "";
+
+  return typeof candidate === "string" ? candidate.trim() : String(candidate ?? "").trim();
+}
+
+/**
  * Generate personalized health recommendations
  * Based on purchase history, age, health patterns
  */
@@ -49,6 +72,8 @@ export async function generateHealthRecommendations(
       include: {
         prescriptions: {
           include: {
+            // keep lines, but also try relations if your schema has them
+            // (Prisma will ignore unknown includes at compile-time, so we only include known keys)
             lines: true,
           },
           orderBy: {
@@ -68,14 +93,12 @@ export async function generateHealthRecommendations(
       },
     });
 
-    if (!customer) {
-      return [];
-    }
+    if (!customer) return [];
 
     // 1. Age-based recommendations
     if (customer.dob) {
       const age = calculateAge(customer.dob);
-      
+
       // Vitamin D for older adults (Indian population often deficient)
       if (age >= 50) {
         recommendations.push({
@@ -87,12 +110,12 @@ export async function generateHealthRecommendations(
         });
       }
 
-      // Calcium for women 30+
+      // Calcium for adults 30+
       if (age >= 30 && age < 50) {
         recommendations.push({
           type: "SUPPLEMENT",
           productName: "Calcium + Vitamin D3",
-          reason: "Maintains bone health and prevents osteoporosis",
+          reason: "Maintains bone health and helps reduce long-term osteoporosis risk.",
           confidence: 75,
           urgency: "LOW",
         });
@@ -101,7 +124,7 @@ export async function generateHealthRecommendations(
 
     // 2. Purchase pattern analysis
     const purchasePattern = analyzePurchasePattern(customer.invoices || []);
-    
+
     // Frequent pain killers → Suggest preventive care
     if (purchasePattern.frequentPainkillers) {
       recommendations.push({
@@ -129,7 +152,7 @@ export async function generateHealthRecommendations(
       recommendations.push({
         type: "VITAMIN",
         productName: "Vitamin C + Zinc",
-        reason: "Boosts immunity and helps prevent frequent colds",
+        reason: "Supports immune function and may reduce frequency/duration of common colds.",
         confidence: 85,
         urgency: "MEDIUM",
       });
@@ -137,12 +160,12 @@ export async function generateHealthRecommendations(
 
     // 3. Seasonal recommendations (Indian market)
     const season = getCurrentIndianSeason();
-    
+
     if (season === "MONSOON") {
       recommendations.push({
         type: "PREVENTIVE",
         productName: "Vitamin C + Echinacea",
-        reason: "Monsoon season increases risk of infections. Boost your immunity.",
+        reason: "Monsoon season increases infection risk. Focus on hydration, hygiene, and immune support.",
         confidence: 80,
         urgency: "MEDIUM",
       });
@@ -152,7 +175,7 @@ export async function generateHealthRecommendations(
       recommendations.push({
         type: "VITAMIN",
         productName: "Vitamin D3",
-        reason: "Winter reduces sunlight exposure. Vitamin D helps maintain energy levels.",
+        reason: "Winter reduces sunlight exposure. Vitamin D supports musculoskeletal and immune health.",
         confidence: 85,
         urgency: "LOW",
       });
@@ -161,26 +184,27 @@ export async function generateHealthRecommendations(
     // 4. Prescription analysis
     if (customer.prescriptions && customer.prescriptions.length > 0) {
       const chronicMeds = customer.prescriptions
-        .flatMap((p) => p.lines)
-        .map((l) => l.drugName.toLowerCase());
+        .flatMap((p: any) => p.lines || [])
+        .map((l: any) => getLineDrugName(l).toLowerCase())
+        .filter(Boolean);
 
       // Diabetics → Blood sugar monitoring supplies
       if (chronicMeds.some((m) => m.includes("metformin") || m.includes("glimepiride"))) {
         recommendations.push({
           type: "PREVENTIVE",
           productName: "Blood Glucose Monitor Strips",
-          reason: "Regular monitoring is essential for diabetes management",
+          reason: "Regular monitoring is essential for diabetes management.",
           confidence: 95,
           urgency: "HIGH",
         });
       }
 
-      // Hypertension → Salt-free alternatives
+      // Hypertension → Sodium reduction
       if (chronicMeds.some((m) => m.includes("amlodipine") || m.includes("telmisartan"))) {
         recommendations.push({
           type: "LIFESTYLE",
           productName: "Low Sodium Salt Substitute",
-          reason: "Managing sodium intake helps control blood pressure",
+          reason: "Reducing sodium intake can support blood pressure control.",
           confidence: 90,
           urgency: "MEDIUM",
         });
@@ -191,24 +215,24 @@ export async function generateHealthRecommendations(
     if (customer.allergies) {
       try {
         const allergies = JSON.parse(customer.allergies) as string[];
-        
+
         if (allergies.some((a) => a.toLowerCase().includes("dust") || a.toLowerCase().includes("pollen"))) {
           recommendations.push({
             type: "OTC",
             productName: "Antihistamine (Cetirizine)",
-            reason: "Keep antihistamines handy for allergy flare-ups",
+            reason: "Keep antihistamines available for allergy flare-ups (as per pharmacist guidance).",
             confidence: 90,
             urgency: "MEDIUM",
           });
         }
-      } catch (e) {
-        // Ignore parse errors
+      } catch {
+        // ignore parse errors
       }
     }
 
     // Sort by urgency and confidence
     return recommendations.sort((a, b) => {
-      const urgencyOrder = { HIGH: 3, MEDIUM: 2, LOW: 1 };
+      const urgencyOrder = { HIGH: 3, MEDIUM: 2, LOW: 1 } as const;
       if (urgencyOrder[a.urgency] !== urgencyOrder[b.urgency]) {
         return urgencyOrder[b.urgency] - urgencyOrder[a.urgency];
       }
@@ -228,14 +252,16 @@ export async function analyzeSymptoms(
   symptoms: string[],
   patientAge?: number
 ): Promise<SymptomAnalysisResult> {
-  // Indian market common symptoms mapping
-  const symptomConditions: Record<string, Array<{
-    condition: string;
-    probability: number;
-    severity: "MILD" | "MODERATE" | "SEVERE";
-    otcs: string[];
-  }>> = {
-    "fever": [
+  const symptomConditions: Record<
+    string,
+    Array<{
+      condition: string;
+      probability: number;
+      severity: "MILD" | "MODERATE" | "SEVERE";
+      otcs: string[];
+    }>
+  > = {
+    fever: [
       {
         condition: "Viral Fever",
         probability: 70,
@@ -243,7 +269,7 @@ export async function analyzeSymptoms(
         otcs: ["Paracetamol 500mg", "Crocin"],
       },
     ],
-    "cough": [
+    cough: [
       {
         condition: "Common Cold",
         probability: 60,
@@ -257,7 +283,7 @@ export async function analyzeSymptoms(
         otcs: ["Antihistamine (Cetirizine)"],
       },
     ],
-    "headache": [
+    headache: [
       {
         condition: "Tension Headache",
         probability: 70,
@@ -288,7 +314,7 @@ export async function analyzeSymptoms(
         condition: cond.condition,
         probability: cond.probability,
         severity: cond.severity,
-        recommendation: `For ${cond.condition}, try OTC medicines: ${cond.otcs.join(", ")}`,
+        recommendation: `For ${cond.condition}, consider OTC options: ${cond.otcs.join(", ")}`,
       });
 
       for (const otc of cond.otcs) {
@@ -303,21 +329,22 @@ export async function analyzeSymptoms(
     }
   }
 
-  // Determine urgency
   const hasSevere = possibleConditions.some((c) => c.severity === "SEVERE");
-  const urgencyLevel = hasSevere ? "HIGH" : 
-    possibleConditions.some((c) => c.severity === "MODERATE") ? "MEDIUM" : "LOW";
+  const urgencyLevel = hasSevere
+    ? "HIGH"
+    : possibleConditions.some((c) => c.severity === "MODERATE")
+      ? "MEDIUM"
+      : "LOW";
 
-  // Indian market disclaimer
-  const disclaimer = `⚠️ DISCLAIMER: This is not a substitute for professional medical advice. 
-    For persistent symptoms, high fever (>101°F), severe pain, or symptoms lasting more than 3 days, 
-    please consult a qualified doctor. OTC medicines should be used only for mild, self-limiting conditions.`;
+  const disclaimer = `⚠️ DISCLAIMER: This is not a substitute for professional medical advice.
+For persistent symptoms, high fever (>101°F), severe pain, or symptoms lasting more than 3 days,
+please consult a qualified doctor. OTC medicines should be used only for mild, self-limiting conditions.`;
 
   return {
-    possibleConditions: possibleConditions.slice(0, 3), // Top 3
-    suggestedOTCs: suggestedOTCs.slice(0, 5), // Top 5
-    requiresDoctorVisit: hasSevere || (patientAge && patientAge < 12), // Children should see doctor
-    urgencyLevel,
+    possibleConditions: possibleConditions.slice(0, 3),
+    suggestedOTCs: suggestedOTCs.slice(0, 5),
+    requiresDoctorVisit: hasSevere || (patientAge != null && patientAge < 12),
+    urgencyLevel: hasSevere ? "EMERGENCY" : urgencyLevel,
     disclaimer,
   };
 }
@@ -346,35 +373,23 @@ function analyzePurchasePattern(invoices: any[]): {
 
   const allProducts = invoices
     .flatMap((inv) => inv.lineItems || [])
-    .map((item: any) => item.productName?.toLowerCase() || "");
+    .map((item: any) => (item.productName ? String(item.productName).toLowerCase() : ""));
 
-  const painKillerCount = allProducts.filter((p) =>
-    painKillerKeywords.some((kw) => p.includes(kw))
-  ).length;
-  
-  const antibioticCount = allProducts.filter((p) =>
-    antibioticKeywords.some((kw) => p.includes(kw))
-  ).length;
-  
-  const coldCount = allProducts.filter((p) =>
-    coldKeywords.some((kw) => p.includes(kw))
-  ).length;
+  const painKillerCount = allProducts.filter((p) => painKillerKeywords.some((kw) => p.includes(kw))).length;
+  const antibioticCount = allProducts.filter((p) => antibioticKeywords.some((kw) => p.includes(kw))).length;
+  const coldCount = allProducts.filter((p) => coldKeywords.some((kw) => p.includes(kw))).length;
 
   return {
-    frequentPainkillers: painKillerCount >= 5, // 5+ purchases
-    frequentAntibiotics: antibioticCount >= 3, // 3+ purchases
-    frequentColdMedicine: coldCount >= 4, // 4+ purchases
+    frequentPainkillers: painKillerCount >= 5,
+    frequentAntibiotics: antibioticCount >= 3,
+    frequentColdMedicine: coldCount >= 4,
   };
 }
 
 function getCurrentIndianSeason(): "SUMMER" | "MONSOON" | "WINTER" {
-  const month = new Date().getMonth() + 1; // 1-12
-  
-  if (month >= 3 && month <= 5) {
-    return "SUMMER"; // March-May
-  } else if (month >= 6 && month <= 9) {
-    return "MONSOON"; // June-September
-  } else {
-    return "WINTER"; // October-February
-  }
+  const month = new Date().getMonth() + 1;
+
+  if (month >= 3 && month <= 5) return "SUMMER"; // Mar-May
+  if (month >= 6 && month <= 9) return "MONSOON"; // Jun-Sep
+  return "WINTER"; // Oct-Feb
 }

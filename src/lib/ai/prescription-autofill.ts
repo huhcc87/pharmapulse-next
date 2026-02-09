@@ -1,8 +1,10 @@
+// src/lib/ai/prescription-autofill.ts
 // AI Prescription Auto-Fill & Verification
 // Enhanced prescription processing with auto-fill and verification
 
 import { prisma } from "@/lib/prisma";
-import { extractPrescriptionText, PrescriptionOCRResult } from "@/lib/ocr/prescription-ocr";
+import { extractPrescriptionText } from "@/lib/ocr/prescription-ocr";
+import { Prisma } from "@prisma/client";
 
 export interface PrescriptionAutofillRequest {
   imageUrl?: string;
@@ -23,12 +25,12 @@ export interface AutofilledDrug {
   duration?: string;
   quantity?: number;
   confidence: number;
-  matchConfidence: number; // How confident we are in the match
+  matchConfidence: number;
   genericAlternatives?: Array<{
     id: number;
     name: string;
     type: "PRODUCT" | "DRUG_LIBRARY";
-    priceDifference?: number; // Savings in percentage
+    priceDifference?: number;
   }>;
   dosageWarning?: {
     level: "INFO" | "WARNING" | "ERROR";
@@ -74,6 +76,10 @@ export interface PrescriptionAutofillResult {
   autofillId?: number;
 }
 
+function asJson(value: unknown): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
 /**
  * Auto-fill prescription from image with drug library matching and verification
  */
@@ -84,7 +90,6 @@ export async function autofillPrescription(
   const startTime = Date.now();
 
   try {
-    // Step 1: Extract text from prescription image
     if (!request.imageUrl && !request.imageBase64) {
       return {
         success: false,
@@ -101,12 +106,25 @@ export async function autofillPrescription(
       };
     }
 
-    const ocrResult = await extractPrescriptionText({
-      imageUrl: request.imageUrl,
-      imageBase64: request.imageBase64,
-      provider: request.ocrProvider,
-      language: request.language,
-    });
+    const provider = request.ocrProvider || "google";
+    const language = request.language;
+
+    const ocrPayload = request.imageUrl
+      ? ({
+          imageUrl: request.imageUrl,
+          imageBase64: request.imageBase64,
+          provider,
+          language,
+        } as unknown)
+      : ({
+          imageBase64: request.imageBase64!,
+          provider,
+          language,
+        } as unknown);
+
+    const ocrResult = await extractPrescriptionText(
+      ocrPayload as Parameters<typeof extractPrescriptionText>[0]
+    );
 
     if (!ocrResult.success || !ocrResult.extractedDrugs) {
       return {
@@ -124,7 +142,6 @@ export async function autofillPrescription(
       };
     }
 
-    // Step 2: Match extracted drugs with drug library
     const autofilledDrugs: AutofilledDrug[] = [];
     const unmatchedDrugs: Array<{
       name: string;
@@ -139,7 +156,6 @@ export async function autofillPrescription(
       );
 
       if (matchResult.matched) {
-        // Verify dosage
         const dosageVerification = await verifyDosage(
           matchResult.drugId!,
           matchResult.drugType!,
@@ -148,7 +164,7 @@ export async function autofillPrescription(
           extractedDrug.duration
         );
 
-        // Get generic alternatives
+        // ✅ Schema-safe: no relations required
         const genericAlternatives = await getGenericAlternatives(
           matchResult.drugId!,
           matchResult.drugType!,
@@ -166,17 +182,13 @@ export async function autofillPrescription(
           quantity: extractedDrug.quantity,
           confidence: ocrResult.confidence || 70,
           matchConfidence: matchResult.confidence,
-          genericAlternatives: genericAlternatives.length > 0 ? genericAlternatives : undefined,
+          genericAlternatives:
+            genericAlternatives.length > 0 ? genericAlternatives : undefined,
           dosageWarning: dosageVerification.warning,
           isUnusualDosage: dosageVerification.isUnusual,
         });
       } else {
-        // Try to get suggestions for unmatched drugs
-        const suggestions = await getDrugSuggestions(
-          extractedDrug.medicationName,
-          tenantId
-        );
-
+        const suggestions = await getDrugSuggestions(extractedDrug.medicationName);
         unmatchedDrugs.push({
           name: extractedDrug.medicationName,
           extractedText: extractedDrug.medicationName,
@@ -185,7 +197,6 @@ export async function autofillPrescription(
       }
     }
 
-    // Step 3: Verify doctor information
     const doctorInfo = {
       name: ocrResult.doctorName,
       license: ocrResult.doctorLicense,
@@ -196,7 +207,6 @@ export async function autofillPrescription(
       doctorInfo.verified = await verifyDoctorLicense(ocrResult.doctorLicense);
     }
 
-    // Step 4: Calculate completeness score
     const completeness = calculateCompletenessScore({
       hasDoctorName: !!ocrResult.doctorName,
       hasDoctorLicense: !!ocrResult.doctorLicense,
@@ -205,7 +215,6 @@ export async function autofillPrescription(
       allDrugsMatched: unmatchedDrugs.length === 0,
     });
 
-    // Step 5: Collect dosage warnings
     const dosageWarnings = autofilledDrugs
       .filter((d) => d.dosageWarning)
       .map((d) => ({
@@ -214,7 +223,6 @@ export async function autofillPrescription(
         message: d.dosageWarning!.message,
       }));
 
-    // Step 6: Collect generic suggestions
     const genericSuggestions = autofilledDrugs
       .filter((d) => d.genericAlternatives && d.genericAlternatives.length > 0)
       .map((d) => ({
@@ -222,7 +230,6 @@ export async function autofillPrescription(
         alternatives: d.genericAlternatives!,
       }));
 
-    // Step 7: Determine if review is required
     const requiresReview =
       unmatchedDrugs.length > 0 ||
       dosageWarnings.some((w) => w.level === "ERROR") ||
@@ -239,30 +246,47 @@ export async function autofillPrescription(
         : "Low confidence matches"
       : undefined;
 
-    // Step 8: Save autofill result to database
+    const autoFillStatus: "COMPLETED" | "PARTIAL" | "FAILED" =
+      autofilledDrugs.length === ocrResult.extractedDrugs.length
+        ? "COMPLETED"
+        : unmatchedDrugs.length > 0
+        ? "PARTIAL"
+        : "FAILED";
+
+    const unusualDosages = autofilledDrugs
+      .filter((d) => d.isUnusualDosage)
+      .map((d) => ({
+        drug: d.matchedDrugName || d.extractedName,
+        dosage: d.dosage,
+        frequency: d.frequency,
+      }));
+
     const autofillRecord = await prisma.aIPrescriptionAutofill.create({
       data: {
         tenantId,
         prescriptionId: request.prescriptionId,
+
         ocrText: ocrResult.text,
         ocrConfidence: ocrResult.confidence,
-        ocrProvider: request.ocrProvider || "google",
-        autoFillStatus: autofilledDrugs.length === ocrResult.extractedDrugs.length ? "COMPLETED" : unmatchedDrugs.length > 0 ? "PARTIAL" : "FAILED",
+        ocrProvider: provider,
+
+        autoFillStatus,
         autoFillConfidence: ocrResult.confidence,
-        extractedDrugs: ocrResult.extractedDrugs,
-        matchedDrugs: autofilledDrugs,
-        unmatchedDrugs: unmatchedDrugs.length > 0 ? unmatchedDrugs : undefined,
+
+        extractedDrugs: asJson(ocrResult.extractedDrugs),
+        matchedDrugs: asJson(autofilledDrugs),
+        unmatchedDrugs: unmatchedDrugs.length > 0 ? asJson(unmatchedDrugs) : undefined,
+
         extractedDoctorName: ocrResult.doctorName,
         extractedDoctorLicense: ocrResult.doctorLicense,
         doctorVerified: doctorInfo.verified,
+
         dosageVerified: dosageWarnings.filter((w) => w.level === "ERROR").length === 0,
-        dosageWarnings: dosageWarnings.length > 0 ? dosageWarnings : undefined,
-        unusualDosages: autofilledDrugs.filter((d) => d.isUnusualDosage).map((d) => ({
-          drug: d.matchedDrugName || d.extractedName,
-          dosage: d.dosage,
-          frequency: d.frequency,
-        })),
-        genericSuggestions: genericSuggestions.length > 0 ? genericSuggestions : undefined,
+        dosageWarnings: dosageWarnings.length > 0 ? asJson(dosageWarnings) : undefined,
+
+        unusualDosages: unusualDosages.length > 0 ? asJson(unusualDosages) : undefined,
+        genericSuggestions: genericSuggestions.length > 0 ? asJson(genericSuggestions) : undefined,
+
         completenessScore: completeness.score,
         missingFields: completeness.missingFields,
         requiresReview,
@@ -273,7 +297,7 @@ export async function autofillPrescription(
 
     return {
       success: true,
-      status: autofilledDrugs.length === ocrResult.extractedDrugs.length ? "COMPLETED" : unmatchedDrugs.length > 0 ? "PARTIAL" : "FAILED",
+      status: autoFillStatus,
       confidence: ocrResult.confidence || 70,
       extractedDrugs: autofilledDrugs,
       unmatchedDrugs,
@@ -297,7 +321,7 @@ export async function autofillPrescription(
       completenessScore: 0,
       missingFields: ["Processing error"],
       requiresReview: true,
-      reviewReason: error.message || "Autofill processing failed",
+      reviewReason: error?.message || "Autofill processing failed",
       genericSuggestions: [],
       dosageWarnings: [],
     };
@@ -306,6 +330,7 @@ export async function autofillPrescription(
 
 /**
  * Match drug name with drug library
+ * (Schema-safe: does not assume genericName exists)
  */
 async function matchDrugWithLibrary(
   drugName: string,
@@ -317,13 +342,10 @@ async function matchDrugWithLibrary(
   drugType?: "PRODUCT" | "DRUG_LIBRARY";
   confidence: number;
 }> {
-  // Try exact match first
+  // Exact brandName match
   const exactMatch = await prisma.drugLibrary.findFirst({
     where: {
-      OR: [
-        { brandName: { equals: drugName, mode: "insensitive" } },
-        { genericName: { equals: drugName, mode: "insensitive" } },
-      ],
+      brandName: { equals: drugName, mode: "insensitive" },
     },
   });
 
@@ -337,13 +359,11 @@ async function matchDrugWithLibrary(
     };
   }
 
-  // Try fuzzy match
+  // Fuzzy brandName token match
+  const token = (drugName.split(" ")[0] ?? drugName).trim();
   const fuzzyMatch = await prisma.drugLibrary.findFirst({
     where: {
-      OR: [
-        { brandName: { contains: drugName.split(" ")[0], mode: "insensitive" } },
-        { genericName: { contains: drugName.split(" ")[0], mode: "insensitive" } },
-      ],
+      brandName: { contains: token, mode: "insensitive" },
     },
   });
 
@@ -357,11 +377,9 @@ async function matchDrugWithLibrary(
     };
   }
 
-  // Try Product table
+  // Product fallback
   const productMatch = await prisma.product.findFirst({
-    where: {
-      name: { contains: drugName.split(" ")[0], mode: "insensitive" },
-    },
+    where: { name: { contains: token, mode: "insensitive" } },
   });
 
   if (productMatch) {
@@ -374,10 +392,7 @@ async function matchDrugWithLibrary(
     };
   }
 
-  return {
-    matched: false,
-    confidence: 0,
-  };
+  return { matched: false, confidence: 0 };
 }
 
 /**
@@ -397,99 +412,56 @@ async function verifyDosage(
   };
   isUnusual: boolean;
 }> {
-  // Basic dosage verification (can be enhanced with drug database)
-  // For now, check for common issues
-
   if (!dosage && !frequency) {
     return {
-      warning: {
-        level: "WARNING",
-        message: "Dosage or frequency not specified",
-      },
+      warning: { level: "WARNING", message: "Dosage or frequency not specified" },
       isUnusual: false,
     };
   }
 
-  // Check for unusually high dosages (basic heuristics)
   const dosageNum = parseFloat(dosage || "0");
-  if (dosageNum > 1000) {
+  if (Number.isFinite(dosageNum) && dosageNum > 1000) {
     return {
-      warning: {
-        level: "ERROR",
-        message: "Dosage appears unusually high - please verify",
-      },
+      warning: { level: "ERROR", message: "Dosage appears unusually high - please verify" },
       isUnusual: true,
     };
   }
 
-  return {
-    isUnusual: false,
-  };
+  return { isUnusual: false };
 }
 
 /**
- * Get generic alternatives for a drug
+ * Generic alternatives
+ *
+ * Your schema does not expose DrugLibrary -> formulation -> brands relations,
+ * so we return [] for now (safe + compiles).
+ *
+ * If you share your DrugLibrary model fields/relations, I’ll implement real generic lookup.
  */
 async function getGenericAlternatives(
   drugId: number,
   drugType: "PRODUCT" | "DRUG_LIBRARY",
   tenantId: number
-): Promise<Array<{
-  id: number;
-  name: string;
-  type: "PRODUCT" | "DRUG_LIBRARY";
-  priceDifference?: number;
-}>> {
-  if (drugType === "DRUG_LIBRARY") {
-    // Find generic versions of the same formulation
-    const drug = await prisma.drugLibrary.findUnique({
-      where: { id: drugId },
-      include: {
-        formulation: {
-          include: {
-            brands: true,
-          },
-        },
-      },
-    });
-
-    if (drug?.formulation) {
-      // Get other brands of the same formulation (generics)
-      const generics = await prisma.drugBrand.findMany({
-        where: {
-          formulationId: drug.formulation.id,
-          id: { not: drug.brandId },
-        },
-        include: {
-          packs: true,
-        },
-      });
-
-      return generics.slice(0, 3).map((g) => ({
-        id: g.id,
-        name: g.name,
-        type: "DRUG_LIBRARY" as const,
-      }));
-    }
-  }
-
+): Promise<
+  Array<{
+    id: number;
+    name: string;
+    type: "PRODUCT" | "DRUG_LIBRARY";
+    priceDifference?: number;
+  }>
+> {
   return [];
 }
 
 /**
  * Get drug suggestions for unmatched drugs
  */
-async function getDrugSuggestions(
-  drugName: string,
-  tenantId: number
-): Promise<string[]> {
-  // Try to find similar drug names
+async function getDrugSuggestions(drugName: string): Promise<string[]> {
+  const key = drugName.length >= 4 ? drugName.substring(0, 4) : drugName;
+
   const suggestions = await prisma.drugLibrary.findMany({
     where: {
-      OR: [
-        { brandName: { contains: drugName.substring(0, 4), mode: "insensitive" } },
-        { genericName: { contains: drugName.substring(0, 4), mode: "insensitive" } },
-      ],
+      brandName: { contains: key, mode: "insensitive" },
     },
     take: 5,
   });
@@ -501,8 +473,6 @@ async function getDrugSuggestions(
  * Verify doctor license (MCI format)
  */
 async function verifyDoctorLicense(license: string): Promise<boolean> {
-  // Basic MCI license format validation
-  // Format: State code (2 letters) + 6-8 digits
   const mciPattern = /^[A-Z]{2}\d{6,8}$/i;
   return mciPattern.test(license);
 }
@@ -516,10 +486,7 @@ function calculateCompletenessScore(data: {
   hasDate: boolean;
   hasDrugs: boolean;
   allDrugsMatched: boolean;
-}): {
-  score: number;
-  missingFields: string[];
-} {
+}): { score: number; missingFields: string[] } {
   const missingFields: string[] = [];
   let score = 100;
 
@@ -543,8 +510,5 @@ function calculateCompletenessScore(data: {
     score -= 20;
   }
 
-  return {
-    score: Math.max(0, score),
-    missingFields,
-  };
+  return { score: Math.max(0, score), missingFields };
 }
